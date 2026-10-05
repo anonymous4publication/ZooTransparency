@@ -1,0 +1,475 @@
+---
+title: "Global Zooscan transparency" # title of the notebook
+author: "" 
+date: 2026-07-09
+description: 
+    This script explores variation in communities transparency across oceans, day/night and biomes.  
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+library(ggridges)
+
+library(patchwork)
+library(pals)
+library(ggridges)
+library(stringr)
+#library(purr)
+library(tidyr)
+library(car)
+library(broom)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# samples
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) 
+
+# marine regions and daytime
+mr <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples_marine_regions+daytime.csv")) %>% 
+  # one summer Arctic sample is missing a day value
+  mutate(day_night=if_else(sampleid==378000027,"Day",day_night))
+
+# objects
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>% 
+  select(objid,sampleid,acquisid,grey_median,grey_std,
+         scientificname:family_order) %>% 
+  left_join(distinct(sp,sampleid,genid,acquisid,d,date,latitude,longitude)) %>% 
+  left_join(distinct(mr,genid,ocean_seas,longhurstabb,longhurst,day_night,biome)) 
+```
+
+Let's calculate the average median organism transparency per sample:
+
+```{r}
+sp_mean <- obj %>% 
+  group_by(genid,date,latitude,longitude,ocean_seas,longhurstabb,longhurst,day_night,biome) %>% 
+  summarize(gmedian=sum(grey_median*d)/sum(d))
+```
+
+# Latitudinal pattern
+
+```{r}
+lat <- sp_mean %>%
+   mutate(ocean_seas=str_remove(ocean_seas, "\\s+\\w+$")) %>% 
+  ggplot(aes(x = latitude, y = gmedian)) +
+  geom_point(aes(color=ocean_seas)) + 
+  #eom_point(color="grey30") + 
+  #geom_point(aes(color=longitude),alpha = 0.6) +
+  geom_smooth(method = "loess", color = "black", se = TRUE) +
+  theme_classic() +
+  coord_flip() + 
+  scale_color_manual(
+    values = c(
+      "North Atlantic" = "#004C99",
+      "South Atlantic" = "#66A9FF",
+      "North Pacific" = "#007D71",
+      "South Pacific" = "#4DC3AD",
+      "Arctic" = "#505050",
+      "Southern" = "#A9A9A9",
+      "Indian" = "#FF6F61",
+      "Mediterranean" = "#F4A736"
+    )) + 
+  #scale_color_gradientn(colors=kovesi.cyclic_wrwbw_40_90_c42_s25(100)) +
+  theme(text = element_text(size = 10),
+        legend.position="none") +
+  labs(y = "Community transparency", x = "Latitude",color="")
+lat 
+```
+
+# Ocean basins
+
+## Statistics
+
+### Hypothesis
+
+For the average transparency per sample (not the distribution of transparency at the organism level), all oceans have a normal distribution of samples, except for the Northern Atlantic (but W close to 1 and p-value of 0.02 so minor deviation).
+
+We also fail to reject the null hypothesis of equal variance so we can assume that they are indeed homogeneous.
+
+```{r}
+# normality: Shapiro-Wilk test
+for (i in unique(sp_mean$ocean_seas)){
+  print(i)
+  print(shapiro.test(sp_mean$gmedian[sp_mean$ocean_seas==i]))
+}
+
+# variance
+leveneTest(gmedian ~ ocean_seas, data = sp_mean)
+#bartlett.test(gmedian ~ ocean_seas, data = sp_mean)
+```
+
+### Tests
+
+Since normality and homogeneity of variance: there are significant differences in the mean between the different oceans/seas.
+
+```{r}
+# one-way ANOVA
+anova_result <- aov(gmedian ~ ocean_seas, data = sp_mean)
+summary(anova_result)
+# kruskal.test(gmedian ~ ocean_seas, data = sp_mean)
+
+# pairwise test: Tukey
+tukey_result <- TukeyHSD(anova_result)
+print(tukey_result)
+
+tukey_tidy <- tidy(tukey_result) %>% 
+  mutate(p.adj.signif = case_when(
+    adj.p.value < 0.001 ~ "***",
+    adj.p.value < 0.01 ~ "**",
+    adj.p.value < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )) %>% 
+  arrange(adj.p.value) %>% 
+  select(-c(term,null.value)) %>% 
+  mutate(term1=str_split_i(contrast,"-",1),
+         term2=str_split_i(contrast,"-",2))
+tukey_tidy
+
+library(ggplot2)
+
+# Plot the differences and confidence intervals
+ggplot(tukey_tidy, aes(x = reorder(term2,estimate), y = estimate)) +
+  geom_point(aes(color = p.adj.signif)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  facet_wrap(.~term1) +
+  scale_color_manual(values = c("ns" = "black", "*" = "blue", "**" = "green", "***" = "purple")) +
+  labs(
+    x = "Group Comparison",
+    y = "Difference in Means",
+    title = "Tukey's HSD: Pairwise Differences with Significance"
+  ) +
+  coord_flip() + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Plot
+
+```{r}
+# get the order of mean community transparency per ocean basins
+tot_mean <- sp_mean %>% 
+  group_by(ocean_seas) %>%
+  summarize(gmedian=mean(gmedian)) %>% 
+  arrange(gmedian) %>% 
+  mutate(ocean_seas=str_remove(ocean_seas, "\\s+\\w+$"))
+
+# boxplot
+box_oceans <- sp_mean %>% 
+  mutate(ocean_seas = str_remove(ocean_seas, "\\s+\\w+$")) %>% 
+  mutate(ocean_seas = factor(ocean_seas, levels = unique(tot_mean$ocean_seas))) %>%
+  ggplot() + 
+  geom_boxplot(aes(y=gmedian, x= ocean_seas ,colour=ocean_seas, fill = ocean_seas), alpha=0.6, outlier.alpha=0)+
+  geom_jitter(aes(y=gmedian, x=ocean_seas ,colour=ocean_seas),width=0.25)+
+  coord_flip() + 
+  scale_color_manual(
+    values = c(
+      "North Atlantic" = "#004C99",
+      "South Atlantic" = "#66A9FF",
+      "North Pacific" = "#007D71",
+      "South Pacific" = "#4DC3AD",
+      "Arctic" = "#505050",
+      "Southern" = "#A9A9A9",
+      "Indian" = "#FF6F61",
+      "Mediterranean" = "#F4A736"
+    )) + 
+  scale_fill_manual(
+    values = c(
+      "North Atlantic" = "#004C99",
+      "South Atlantic" = "#66A9FF",
+      "North Pacific" = "#007D71",
+      "South Pacific" = "#4DC3AD",
+      "Arctic" = "#505050",
+      "Southern" = "#A9A9A9",
+      "Indian" = "#FF6F61",
+      "Mediterranean" = "#F4A736"
+    )) + 
+  labs(x = "", y = "Community transparency", fill = "", color ="")+
+  theme_classic(base_size = 12) +
+  theme(legend.position="none")
+box_oceans 
+
+sp_mean %>% group_by(ocean_seas) %>% summarize(moy=mean(gmedian),
+                                               std=sd(gmedian)) %>% arrange(moy)
+
+
+ # distribution per ocean 
+ocean_indiv_mean <- obj %>% group_by(ocean_seas) %>% 
+  summarize(moy=sum(grey_median*d)/sum(d),
+            std = sqrt(sum(d * (grey_median - moy)^2) / sum(d))) %>% arrange(moy) %>%
+  mutate(ocean_seas = str_remove(ocean_seas, "\\s+\\w+$")) %>%
+  mutate(ocean_seas = factor(ocean_seas, levels = unique(tot_mean$ocean_seas)))
+ocean_indiv_mean
+
+densities <- obj %>%
+  mutate(ocean_seas = str_remove(ocean_seas, "\\s+\\w+$")) %>%
+  mutate(ocean_seas = factor(ocean_seas, levels = unique(tot_mean$ocean_seas))) %>%
+  group_by(ocean_seas) %>%
+  summarise(density_data = list({
+    subset_data <- grey_median
+    subset_weights <- d
+    subset_weights <- subset_weights / sum(subset_weights, na.rm = TRUE)
+
+    # Compute weighted mean and sd
+    wmean <- sum(subset_data * subset_weights)
+    wvar <- sum(subset_weights * (subset_data - wmean)^2)
+    wsd <- sqrt(wvar)
+
+    # Use this to estimate bandwidth (rule-of-thumb style)
+    bw <- 1.06 * wsd * length(subset_data)^(-1/5)
+
+    dens <- density(subset_data, weights = subset_weights, bw = bw, n = 512)
+    tibble(x = dens$x, y = dens$y)
+  }), .groups = "drop") %>%
+  unnest(density_data)
+
+
+dist_oceans <- ggplot(densities, aes(x = x, y = ocean_seas, height = y, fill = ocean_seas)) +
+  geom_ridgeline(scale = 40, alpha = 0.7) +  # scale to amplify vertical height
+  scale_fill_manual(values = c(
+    "North Atlantic" = "#004C99",
+    "South Atlantic" = "#66A9FF",
+    "North Pacific" = "#007D71",
+    "South Pacific" = "#4DC3AD",
+    "Arctic" = "#505050",
+    "Southern" = "#A9A9A9",
+    "Indian" = "#FF6F61",
+    "Mediterranean" = "#F4A736"
+  )) +
+  theme_classic() +
+  labs(x = "Organism transparency", y = NULL) +
+  theme(legend.position = "none", text = element_text(size = 12))
+dist_oceans
+```
+
+# Day night
+
+## Statistics
+
+### Hypothesis
+
+The day samples are not normally distributed (p=0.005) and there isn't homogeneity of variance.
+
+```{r}
+# normality: Shapiro-Wilk test
+for (i in unique(sp_mean$day_night)){
+  print(i)
+  print(shapiro.test(sp_mean$gmedian[sp_mean$day_night==i]))
+}
+
+# variance
+leveneTest(gmedian ~ day_night, data = sp_mean)
+#bartlett.test(gmedian ~ ocean_seas, data = sp_mean)
+```
+
+### Tests
+
+Night samples are not normal through Shapiro, so we will run a Mann-Whitney U test (Wilcoxon Rank-Sum test).
+
+```{r}
+wilcox.test(gmedian ~ day_night, data = sp_mean, alternative = "two.sided")
+```
+
+What about day/night per ocean?
+
+```{r}
+# how many samples 
+count(ungroup(sp_mean),day_night,ocean_seas) %>% arrange(ocean_seas,n)
+
+# day night differences
+daynight_diff <- sp_mean %>% 
+  group_by(ocean_seas,day_night) %>% 
+  summarize(moy=mean(gmedian)) %>% 
+  pivot_wider(names_from="day_night",values_from="moy") %>% 
+  mutate(difference=Day-Night)
+
+# two-way ANOVA 
+mod <- aov(gmedian ~ day_night * ocean_seas,
+  data = sp_mean)
+
+# print results
+summary(mod)
+
+# linear model
+model <- lm(
+  gmedian ~ ocean_seas * day_night,
+  data = sp_mean
+)
+summary(model)
+
+# adjusted
+library(emmeans)
+emmeans(
+  model,
+  pairwise ~ day_night | ocean_seas,
+  adjust = "BH"
+)
+```
+
+## Plot
+
+```{r}
+# day night 
+sp_mean %>% group_by(day_night) %>% summarize(moy=mean(gmedian))
+
+#day night
+daynight <- sp_mean %>% 
+  ggplot() + 
+  geom_violin(aes(y=gmedian, x= day_night ,colour=day_night), alpha=0.6)+
+  geom_boxplot(aes(y=gmedian, x= day_night ,colour=day_night, fill = day_night),width=0.5,alpha=0.6, outlier.alpha=0)+
+  geom_jitter(aes(y=gmedian, x=day_night ,colour=day_night),width=0.25)+
+  scale_color_manual(
+    values = c(
+      "Day" = "#FFE29A",
+      "Night" = "#002F6C"
+    )) + 
+  scale_fill_manual(
+    values = c(
+      "Day" = "#FFE29A",
+      "Night" = "#002F6C"
+    )) + 
+  labs(x = "", y = "Community transparency", fill = "", color ="")+
+  theme_classic(base_size = 12) +
+  theme(legend.position="none")
+daynight
+```
+
+# Biomes
+
+## Statistics
+
+### Hypothesis
+
+The coastal and westerlies biomes are not normal and there isn't homogeneity of variance.
+
+```{r}
+# normality: Shapiro-Wilk test
+for (i in unique(sp_mean$biome)){
+  print(i)
+  print(shapiro.test(sp_mean$gmedian[sp_mean$biome==i]))
+}
+
+# variance
+leveneTest(gmedian ~ biome, data = sp_mean)
+#bartlett.test(gmedian ~ ocean_seas, data = sp_mean)
+```
+
+### Tests
+
+Do a a Kruskal-Wallis (does not assume normality), and Games-Howell for post-hoc comparisons (robust to unequal variances).
+
+```{r}
+# Kruskal-Wallis
+kruskal.test(gmedian ~ biome, data = sp_mean)
+
+# Games-Howell
+library(rstatix)
+games_howell_test(data = ungroup(sp_mean) %>% mutate(biome=factor(biome)), formula = gmedian ~ biome) %>% arrange(p.adj)
+pairwise.wilcox.test(sp_mean$gmedian, sp_mean$biome, p.adjust.method = "BH")
+```
+
+## Plot
+
+```{r}
+sp_mean %>% group_by(biome) %>% summarize(moy=mean(gmedian))
+biomes <- sp_mean %>% 
+  mutate(biome=factor(biome,levels=c("Polar","Westerlies","Trades","Coastal"))) %>% 
+  ggplot() + 
+  geom_violin(aes(y=gmedian, x= biome ,colour=biome), alpha=0.6)+
+  geom_boxplot(aes(y=gmedian, x= biome ,colour=biome, fill = biome), alpha=0.6, outlier.alpha=0)+
+  geom_jitter(aes(y=gmedian, x=biome ,colour=biome),width=0.25)+
+  scale_color_manual(
+    values = c(
+      "Coastal" = "#E6BF83",
+      "Polar" = "#A9D6E5",
+      "Trades" = "#FFCF63",
+      "Westerlies" = "#73A857"
+    )) + 
+  scale_fill_manual(
+    values = c(
+      "Coastal" = "#E6BF83",
+      "Polar" = "#A9D6E5",
+      "Trades" = "#FFCF63",
+      "Westerlies" = "#73A857"
+    )) + 
+  labs(x = "", y = "Community transparency", fill = "", color ="")+
+  theme_classic(base_size = 12) +
+  theme(legend.position="none")
+biomes 
+```
+
+# General plot
+
+```{r}
+ptop <- (dist_oceans | box_oceans) +
+  plot_annotation(tag_levels = list(c("a","b"))) &  # manual tag list
+  theme(plot.tag = element_text(face = "bold"),
+        plot.tag.position = "topleft")
+ptop
+```
+
+```{r}
+#ggsave("../figures/Fig5top.tiff",dpi=300,width=7,height=3,scale=1.5)
+```
+
+```{r}
+pbottom <- (lat | daynight | biomes) +
+  plot_layout(widths=c(1.25,1,1.25)) + 
+  plot_annotation(tag_levels = list(c("c","d","e"))) &  # manual tag list
+  theme(plot.tag = element_text(face = "bold"),
+        plot.tag.position = "topleft")
+pbottom
+
+pall <- ptop / pbottom + plot_layout(nrow=2)
+pall
+```
+
+```{r}
+#ggsave("../figures/Fig5bottom.tiff",dpi=300,width=7,height=3,scale=1.5)
+ggsave(file.path(cfg$project$figures,"Fig5_lat_biomes_day_oceans.tiff"),dpi=300,width=7,height=6,scale=1.5)
+```

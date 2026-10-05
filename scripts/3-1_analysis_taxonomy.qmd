@@ -1,0 +1,321 @@
+---
+title: "Taxonomy and transparency" # title of the notebook
+author: "" 
+date: 2026-07-07
+description: 
+    This script looks at the relationship between taxonomy and transparency. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+
+library(patchwork)
+library(moments)
+```
+
+# Data
+
+```{r}
+# data 
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv"))
+
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>% 
+  left_join(select(sp,sampleid,acquisid,d)) 
+```
+
+# Classes and phylum
+
+For this visualization, we only keep classes with more than 50 individuals, and we group Radiolarians with the broader Rhizaria.
+
+```{r}
+sel_obj <- obj %>% 
+  group_by(scientificname) %>% 
+  filter(n() > 50) %>% 
+  # assign scientific names Harosa and Rhizaria as phylums
+  mutate(phylum=if_else(is.na(phylum),scientificname,phylum)) %>% 
+  # group the Radiolarians (Rdiozoa) with Rhizaria
+  mutate(phylum=if_else(phylum=="Radiozoa","Rhizaria",phylum))
+```
+
+## Boxplot
+
+```{r}
+# ---- 1. Weighted quantile  -----------
+# compute the quantile # of `x` using `w` as the weight of each observation (here, d)
+wtd_quantile <- function(x, w, probs) {
+  ord <- order(x)
+  x <- x[ord]; w <- w[ord]
+  cum_w <- cumsum(w) / sum(w)
+  approx(cum_w, x, xout = probs, rule = 2)$y
+}
+
+# ---- 2. 5 boxplot stats per group, weighted by d --------
+box_stats <- sel_obj %>%
+  group_by(class_phylum, phylum) %>%
+  summarise(
+    ymin   = wtd_quantile(grey_median, d, 0.05),  # or 0 for true min
+    lower  = wtd_quantile(grey_median, d, 0.25),
+    middle = wtd_quantile(grey_median, d, 0.50),
+    upper  = wtd_quantile(grey_median, d, 0.75),
+    ymax   = wtd_quantile(grey_median, d, 0.95),  # or 1 for true max
+    .groups = "drop"
+  )
+
+# ---- 3. Boxplots -------------
+pbox <- box_stats %>%
+  ggplot(aes(x = reorder(class_phylum, middle), fill = phylum)) +
+  geom_boxplot(
+    aes(ymin = ymin, lower = lower, middle = middle, upper = upper, ymax = ymax),
+    stat = "identity",
+    color = "wheat1"
+  ) +
+  theme_classic() +
+  coord_flip() +
+  scale_fill_manual(values = c("Annelida" = "#F1A7A3",
+                                "Arthropoda" = "#D56B5A",
+                                "Bryozoa" = "#FDBF68",
+                                "Cercozoa" = "#6C3F60",
+                                "Chaetognatha" = "#00A99D",
+                                "Chordata" = "#006F6D",
+                                "Cnidaria" = "#F28D35",
+                                "Echinodermata" = "#6A9A8D",
+                                "Foraminifera" = "#9E5D84",
+                                "Harosa" = "#A8D1E6",
+                                "Mollusca" = "#E3B400",
+                                "Rhizaria" = "#D15B1D")) +
+  theme(axis.text.y = element_text(vjust = 0.25),
+        text = element_text(size = 12)) +
+  labs(y = "Organism median grey level", x = "", fill = "Phylum")
+
+pbox
+```
+
+## Variation
+
+Calculate the weighted moments.
+
+```{r}
+# Weighted mean / sd / skewness / kurtosis]
+# Weighted central moment of order k: m_k = sum(w*(x-mean_w)^k) / sum(w)
+wtd_mean <- function(x, w) sum(w * x) / sum(w)
+ 
+wtd_moment <- function(x, w, k, mu = wtd_mean(x, w)) {
+  sum(w * (x - mu)^k) / sum(w)
+}
+ 
+wtd_sd <- function(x, w) {
+  sqrt(wtd_moment(x, w, 2))
+}
+ 
+wtd_skewness <- function(x, w) {
+  mu <- wtd_mean(x, w)
+  m2 <- wtd_moment(x, w, 2, mu)
+  m3 <- wtd_moment(x, w, 3, mu)
+  m3 / m2^1.5
+}
+ 
+wtd_kurtosis <- function(x, w, excess = FALSE) {
+  mu <- wtd_mean(x, w)
+  m2 <- wtd_moment(x, w, 2, mu)
+  m4 <- wtd_moment(x, w, 4, mu)
+  k <- m4 / m2^2
+  if (excess) k - 3 else k   # moments::kurtosis() is NOT excess (normal = 3)
+}
+
+
+# order by classes transparency
+order_levels <- arrange(box_stats, middle)
+
+# calculate skewness, kurtosis and standard deviation 
+allspread <- sel_obj %>%
+  mutate(class_phylum = factor(class_phylum, levels = unique(order_levels$class_phylum))) %>%
+  group_by(class_phylum, phylum) %>%
+  summarize(
+    sk   = wtd_skewness(grey_median, d),
+    kurt = wtd_kurtosis(grey_median, d),
+    std  = wtd_sd(grey_median, d),
+    .groups = "drop"
+  )
+```
+
+Plot them toghether.
+
+```{r}
+psk <- allspread %>% 
+  ggplot(aes(x=class_phylum,y="Skewness",size=sk)) + 
+  coord_flip() + 
+  geom_point(color="grey80") + 
+  theme_classic() + 
+  theme(text=element_text(size=12),
+        #axis.text.x=element_blank(),
+        #axis.ticks.x=element_blank(),
+        #axis.line.x=element_blank(),
+        legend.position="none") + 
+  labs(x="",y="")
+
+pkurt <- allspread %>% 
+  ggplot(aes(x=class_phylum,y="Kurtosis",size=kurt)) + 
+  coord_flip() + 
+  geom_point(color="grey80") + 
+  theme_classic() + 
+  theme(legend.position="none",
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.line.y=element_blank()) + 
+  labs(x="",y="")
+
+pstd <- allspread %>% 
+  ggplot(aes(x=class_phylum,y="Standard \ndeviation",size=std)) + 
+  coord_flip() + 
+  geom_point(color="grey80") + 
+  theme_classic() + 
+  theme(legend.position="none",
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.line.y=element_blank()) + 
+  labs(x="",y="")
+```
+
+Together:
+
+```{r}
+# variation
+pdot <- psk + pkurt + pstd + plot_layout(ncol=3) 
+
+# together
+pall <- (pdot | pbox) +  
+  plot_layout(widths=c(1,2.5))  +
+  plot_annotation(tag_levels = list(c("a", "","","b"))) &  # manual tag list
+  theme(plot.tag = element_text(face = "bold"),
+        plot.tag.position = "topleft")
+pall
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"Fig4_taxo_Routput.tiff"),dpi=300,width=7,height=4,scale=1.5)
+```
+
+# Details of scientificnames
+
+## Boxplot
+
+Same as before, but separated into scientificnames.
+
+```{r}
+box_stats_name <- sel_obj %>%
+  group_by(scientificname, class_phylum, phylum) %>%
+  summarise(
+    ymin   = wtd_quantile(grey_median, d, 0.05),
+    lower  = wtd_quantile(grey_median, d, 0.25),
+    middle = wtd_quantile(grey_median, d, 0.50),
+    upper  = wtd_quantile(grey_median, d, 0.75),
+    ymax   = wtd_quantile(grey_median, d, 0.95),
+    .groups = "drop"
+  ) %>%
+  left_join(select(box_stats, class_phylum, middle_class = middle), by = "class_phylum") %>%
+  arrange(middle_class, middle) %>%
+  mutate(row_id = row_number())            # <- continuous axis position, 1 per species
+ 
+# Where to put each class_phylum label: center of its block of species,
+# and where the blocks change (for optional divider lines)
+class_labels <- box_stats_name %>%
+  group_by(class_phylum) %>%
+  summarise(y_pos = mean(row_id), .groups = "drop")
+ 
+class_boundaries <- box_stats_name %>%
+  group_by(class_phylum) %>%
+  summarise(max_row = max(row_id), .groups = "drop") %>%
+  slice(-n()) %>%                          # drop the last one, no line needed after final group
+  pull(max_row)
+ 
+pbox_species <- ggplot(box_stats_name, aes(x = row_id, fill = phylum,group=row_id, color=phylum)) +
+  geom_boxplot(
+    aes(ymin = ymin, lower = lower, middle = middle, upper = upper, ymax = ymax),
+    stat = "identity",
+    width = 0.5
+  ) +
+  # divider lines between phylum blocks (drawn as vline pre-flip -> horizontal after coord_flip)
+  #geom_vline(xintercept = class_boundaries + 0.5, color = "grey85", linewidth = 0.3) +
+  coord_flip() +
+  scale_x_continuous(
+    breaks = class_labels$y_pos,
+    labels = class_labels$class_phylum,
+    expand = expansion(add = 1)
+  ) +
+  theme_classic() +
+  scale_fill_manual(values = c("Annelida" = "#F1A7A3",
+                                "Arthropoda" = "#D56B5A",
+                                "Bryozoa" = "#FDBF68",
+                                "Cercozoa" = "#6C3F60",
+                                "Chaetognatha" = "#00A99D",
+                                "Chordata" = "#006F6D",
+                                "Cnidaria" = "#F28D35",
+                                "Echinodermata" = "#6A9A8D",
+                                "Foraminifera" = "#9E5D84",
+                                "Harosa" = "#A8D1E6",
+                                "Mollusca" = "#E3B400",
+                                "Rhizaria" = "#D15B1D")) +
+  scale_color_manual(values = c("Annelida" = "#F1A7A3",
+                                "Arthropoda" = "#D56B5A",
+                                "Bryozoa" = "#FDBF68",
+                                "Cercozoa" = "#6C3F60",
+                                "Chaetognatha" = "#00A99D",
+                                "Chordata" = "#006F6D",
+                                "Cnidaria" = "#F28D35",
+                                "Echinodermata" = "#6A9A8D",
+                                "Foraminifera" = "#9E5D84",
+                                "Harosa" = "#A8D1E6",
+                                "Mollusca" = "#E3B400",
+                                "Rhizaria" = "#D15B1D")) +
+  theme(axis.text.y = element_text(vjust = 0.25),
+        text = element_text(size = 12)) +
+  labs(y = "Organism median grey level", x = "", fill = "Phylum")
+ 
+pbox_species
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"FigSX_taxo_detailed.tiff"),dpi=300,width=5,height=8,scale=1.5)
+```

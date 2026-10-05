@@ -1,0 +1,217 @@
+---
+title: "Zooscan samples marine regions and day/night" # title of the notebook
+author: "" 
+date: 2026-08-03
+description: 
+    This script uses mregions2 package to assign marine regions to Zooscan samples, and calculates with the suncalc package if it was sampled during day or night.
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+
+# steps for mregions2 package 
+# install.packages(c("jsonld","checkmate","ISOcodes","wrapr","sf","leaflet","leaflet.extras2"))
+# install.packages("mregions2", repos = "https://ropensci.r-universe.dev")
+library(mregions2)
+library(rnaturalearthdata)
+library(rnaturalearth)
+
+library(sf)
+
+# Turn off s2 geometry processing (or error for the sf join)
+sf::sf_use_s2(FALSE)
+
+#day/night 
+library(suncalc)
+library(lutz)
+```
+
+# Data
+
+```{r}
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv"))
+```
+
+# Marine regions
+
+```{r}
+longhurst=mrp_get("longhurst")
+longhurst <- longhurst %>%
+  mutate(prov=str_split_i(provdescr,"- ",2),
+         biome=str_split_i(provdescr," -",1))
+oceans=mrp_get("goas")
+
+my_data_sf <- tibble(genid=sp$genid,
+                     lat=sp$latitude,
+                     lon=sp$longitude) %>%
+  distinct() %>% 
+  st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+
+# add longhurst through spatial join
+data_prov <- st_join(my_data_sf, longhurst[, c("provcode", "prov","biome")], join = st_intersects)
+# add oceans through spatial join
+data_prov_ocean <- st_join(data_prov, oceans[, c("name")], join = st_intersects)
+```
+
+One change is that Longhurst assigns the South Pacific Tropical Gyre Province to the Westerlies biomes while more recent studies argue for a Trades assignation (Van Oostende et al. 2023, Vichi et al 2011).
+
+Another is that 2 Chilean samples are deep in fjords, and as such, the Marine Gazetteer doesn't assign them propperly to the Longhurst province.
+
+```{r}
+sp <- data_prov_ocean %>% 
+  mutate(biome=ifelse(provcode=="SPSG","Trades",biome)) %>% 
+  ungroup() %>% 
+  select(genid,latitude=lat,longitude=lon,longhurstabb=provcode,longhurst=prov,biome,ocean_seas=name) %>% 
+  mutate(longhurst=ifelse(genid %in% c(104,106),
+                          "Chile-Peru Current Coastal Province",
+                          longhurst),
+         longhurstabb=ifelse(genid %in% c(104,106),"CHIL",longhurstabb),
+         biome=ifelse(genid %in% c(104,106),"Coastal",biome)) %>%
+  right_join(sp)
+```
+
+# Day/Night
+
+Set:
+
+-   dawn, between the nautical dawn and 30min after sunrise
+-   dusk between 30min before sunset and nautical dusk
+
+Note that for some Polar Circle samples, no nautical dawn or dusk can be calculated because it's day all day long. So these would be considered all day samples. Same for all those without a sunrise.
+
+Also consider that for the few that have a sunset/sunrise but no nauticalDawn or Dusk, these are the same.
+
+The samples in the polar circle between June and mid-September are also all day.
+
+```{r}
+
+# --- get local day 
+sp <- sp %>% 
+  # add the local timezone
+  mutate(tz=tz_lookup_coords(latitude, longitude, method = "accurate")) %>% 
+  # correct the America/Godthab obsolete
+  mutate(tz=ifelse(tz=="America/Godthab","America/Nuuk",tz)) %>% 
+  # change to local datetime time (note that even if the local times are UTC, only interested in how they look)
+  mutate(local_datetime=as.POSIXct(map2_chr(date, tz, ~ as.character(with_tz(.x, .y))),tz="UTC")) %>% 
+  # format date for sunlight times 
+  rename(datetime=date,lat=latitude,lon=longitude) %>% 
+  mutate(date = as.Date(datetime))
+
+# --- calculate the sunrise/sunset and nautical ones for each date
+sun_times <- getSunlightTimes(data=distinct(sp,date,lat,lon), 
+                              # tz=unique(mr$tz), gives the end results in local time
+                              keep = c("sunrise", "sunset","nauticalDawn", "nauticalDusk")) %>% 
+  right_join(sp) %>% 
+  rename(latitude=lat,longitude=lon) %>% 
+  # convert the UTC times into their own local time (even if assigned UTC label)
+  mutate(local_dawn=as.POSIXct(map2_chr(nauticalDawn, tz, ~ as.character(with_tz(.x, .y))), tz = "UTC"),
+         local_sunrise=as.POSIXct(map2_chr(sunrise, tz, ~ as.character(with_tz(.x, .y))), tz = "UTC"),
+         local_sunset=as.POSIXct(map2_chr(sunset, tz, ~ as.character(with_tz(.x, .y))), tz = "UTC"),
+         local_dusk=as.POSIXct(map2_chr(nauticalDusk, tz, ~ as.character(with_tz(.x, .y))), tz = "UTC"))
+```
+
+A problematic that we have is that there are 39 samples with no nautical dawn:
+
+-   all the samples that have a sunrise and sunset but no nautical (Arctic/Antartic) are all day (note that for 3 samples, the sunrise/sunset refers to the day after/before) but based on the day/before or after, it should also be day values)
+-   Artic samples with no sunrise/sunset are all between 7h and 16h30 in June/July/August so they are all day
+
+Second problematic: for some samples, it gives the sunrise/sunset associated with the following day so assign wrongly the datetime. I fix it, if there is a different day, by taking the local values without considering the date =\> this only fixes the day/night (not the timeofday)
+
+```{r}
+# --- define time of day in our dataset 
+daytime <- sp %>%
+  # get the sunrise and sunset
+  left_join(sun_times) %>% 
+  # assign a day/night and more precise group for dawn and dusk
+  mutate(day_night = ifelse(datetime < nauticalDusk & datetime >= nauticalDawn, "Day","Night"),
+         timeofday = case_when(datetime >= nauticalDawn & datetime < sunrise + 30 * 60 ~ "Dawn",
+                               datetime > sunset - 30 * 60 & datetime <= nauticalDusk ~ "Dusk",
+                               TRUE ~ day_night)) %>% 
+  # fix the wrong day samples 
+  mutate(day_night=ifelse((yday(local_datetime) != yday(local_sunrise)) & 
+           (yday(local_datetime) != yday(local_sunset)),
+           ifelse(hour(local_datetime)>hour(local_dawn) & hour(local_datetime)<hour(local_dusk),"Day","Night"),
+           day_night)) %>% 
+  # fix the polar samples 
+  mutate(day_night=ifelse(is.na(nauticalDawn),"Day",day_night))
+```
+
+# Season
+
+We are going to do simple (simplistic):
+
+-   equatorial: within 5 degrees north and south of the equator
+
+-   spring: march to may (autumn in the southern hemisphere)
+
+-   summer: june to august (winter in the southern hemisphere)
+
+-   autumn: september to november (spring in the southern hemisphere)
+
+-   winter: december to february (summer in the northern hemisphere)
+
+```{r}
+daytime <- daytime %>% 
+  rowwise() %>% 
+  mutate(season=case_when(latitude > -5 & latitude < 5 ~ "Equator",
+                          latitude > 0 & month(datetime) %in% c(3,4,5) ~ "Spring",
+                          latitude > 0 & month(datetime) %in% c(6,7,8) ~ "Summer",
+                          latitude > 0 & month(datetime) %in% c(9,10,11) ~ "Autumn",
+                          latitude > 0 & month(datetime) %in% c(10,1,2) ~ "Winter",
+                          latitude < 0 & month(datetime) %in% c(3,4,5) ~ "Autumn",
+                          latitude < 0 & month(datetime) %in% c(6,7,8) ~ "Winter",
+                          latitude < 0 & month(datetime) %in% c(9,10,11) ~ "Spring",
+                          latitude < 0 & month(datetime) %in% c(12,1,2) ~ "Summer",
+                          ))
+```
+
+# Export
+
+```{r}
+daytime <- distinct(daytime,genid,sampleid,latitude,longitude,date=datetime,
+                  ocean_seas,biome,longhurst,longhurstabb,
+                  day_night,timeofday,season)
+write_csv(daytime,file.path(cfg$project$data,"imagery_zooscan_samples_marine_regions+daytime.csv"))
+```

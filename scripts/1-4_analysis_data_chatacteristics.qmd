@@ -1,0 +1,215 @@
+---
+title: "Data characteristics" # title of the notebook
+author: "" 
+date: 2026-08-11
+description: 
+    This script plots the sample map and retrieve projects and individual characteristics. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(ggthemes)
+library(cmocean)
+library(cowplot)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# projects
+proj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_projects.csv"),
+                 col_select=c("projid","title","title_code"))
+
+# samples
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) %>%
+  distinct(projid,genid,sampleid,longitude,latitude,depth_max,date) %>%
+  left_join(proj)
+
+# objects 
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv"),
+                col_select=c("objid","sampleid","grey_median","acquisid","grey_std")) %>% 
+  left_join(sp)
+```
+
+# Map
+
+------------------------------------------------------------------------
+
+```{r}
+# Define a simple gray-scale world map
+map_bck <- ggplot() +
+  geom_polygon(data = map_data("world"), aes(x = long, y = lat, group = group), 
+  fill = "#E8E8E8", color = "grey90", size = 0.3) +  # light gray background and borders
+  theme_minimal() +
+  theme(panel.grid.major = element_line(color = "#D0D0D0", linetype = "dotted", size = 0.4),  # Light, subtle grid
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),  # Transparent background
+        axis.text = element_text(size = 10, color = "gray20"), # Latitude and longitude labels
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        legend.position = "bottom")  # Legend at the bottom
+
+# plot sp 
+plot_sp <- sp %>% 
+  group_by(genid,latitude,longitude,title_code,date) %>% 
+  filter(depth_max==max(depth_max)) 
+
+# Plot points with custom colors and slight transparency
+map_bck + 
+  geom_point(aes(x = longitude, y = latitude, color=depth_max,shape = title_code,), 
+             data = plot_sp, 
+             size = 2, alpha = 0.8) +
+  scale_shape_manual(values=c(8,17,15,18,16,3)) + 
+  scale_color_cmocean(name="deep") +
+  # longitude labels
+  scale_x_continuous(breaks = seq(-200, 200, by = 50), limits = c(-180, 180),
+                     labels = function(x) ifelse(x == 0, "0°", sprintf("%d°%s", abs(x), ifelse(x < 0, "W", "E")))) + 
+  # latitude labels
+  scale_y_continuous(breaks = seq(-100, 100, by = 50), limits = c(-90, 90),
+                     labels = function(y) ifelse(y == 0, "0°", sprintf("%d°%s", abs(y), ifelse(y < 0, "S", "N")))) + 
+  coord_fixed() +
+  labs(shape = "", color="Tow depth \n        (m)") +
+  guides(color = guide_colorbar(order = 1), shape = guide_legend(order = 2))
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"Fig2a.tiff"),dpi=300,width=7,height=4)
+```
+
+Depth percentage below 200m:
+
+```{r}
+sp %>% 
+  distinct(genid,depth_max) %>% 
+  add_count() %>% 
+  filter(depth_max < 210) %>% 
+  group_by(n) %>% 
+  summarize(less200=n()) %>% 
+  mutate(perc=less200*100/n)
+```
+
+# Latitude distribution
+
+```{r}
+plot_sp %>% 
+  ungroup() %>%
+  mutate(month=month(date,label=TRUE, abbr = TRUE)) %>% 
+  # bins
+  mutate(
+    lat_bin = cut(latitude, breaks = seq(-90,90, by = 10), include.lowest = TRUE, right = FALSE),
+    lon_bin = cut(longitude, breaks = seq(-180,180, by = 20), include.lowest = TRUE, right = FALSE)
+  ) %>%
+  count(lat_bin,month) %>% 
+  ggplot(aes(x=month,y=lat_bin,fill=n)) +
+  geom_tile(color= "white",size=0.1) + 
+  scale_fill_cmocean(name="thermal") +
+  theme_classic() + 
+  labs(x="",y="Latitude",fill="# samples") + 
+  theme(legend.position="bottom")
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"Fig2b.tiff"),dpi=300,width=4,height=4)
+```
+
+# Numbers
+
+------------------------------------------------------------------------
+
+```{r}
+# number of projects 
+nrow(proj)
+
+# number of samples 
+distinct(sp,genid) %>% nrow()
+
+# number of images 
+nrow(obj)
+```
+
+# Projects table
+
+------------------------------------------------------------------------
+
+```{r}
+tb <- obj %>% 
+  group_by(ecotaxaID=projid,project=title_code,campaign=title) %>% 
+  summarize(samples=n_distinct(genid),images=n_distinct(objid)) %>% 
+  # adjust the project
+  mutate(project=ifelse(str_detect(project,"Tara"),"Tara",project)) %>% 
+  mutate(project=factor(project,levels=c("Tara","Apero","Tonga","Triatlas","Creocean"))) %>% 
+  # arrange properly
+  arrange(project,desc(project)) %>% 
+  # add person in charge column
+  mutate(contact=case_when(str_detect(campaign,"Tara|TONGA|APERO")~"lombard@imev-mer.fr",
+                           str_detect(campaign,"Creocean")~"legall@creocean.fr",
+                           str_detect(campaign,"Triatlas")~"rkiko@geomar.de")) %>% 
+  # reorder columns
+  relocate(ecotaxaID,project,campaign,`#samples`=samples,`#images`=images,contact)
+
+tb
+```
+
+# Ranges
+
+Individual grey values range:
+
+```{r}
+summary(obj$grey_median)
+```
+
+Zooplankton community ranges (weighted mean of the median values):
+
+```{r}
+density <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) %>%
+  distinct(acquisid,d) 
+
+obj %>% 
+  left_join(density) %>% 
+  group_by(genid) %>%
+  mutate(gmedian=sum(grey_median*d)/sum(d)) %>% 
+  summary()
+```

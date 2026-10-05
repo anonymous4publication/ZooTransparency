@@ -1,0 +1,329 @@
+---
+title: "Environmental and Taxonomic forcings" # title of the notebook
+author: "" 
+date: 2026-07-10
+description: 
+    This script runs Ridge regression models to estimate the importance of environmental and taxonomic forcings on the community transparency.
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+
+# stats
+library(vegan) # Hellinger transformation 
+library(glmnet) # Ridge model
+library(spatial) # spatial interpolation 
+
+# plot 
+library(patchwork)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# samples metadata
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) %>% 
+  distinct(acquisid,sampleid,genid,d,latitude)
+
+# community grey
+grey <- read_csv(file.path(cfg$project$data,
+                           "imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>% 
+  left_join(sp) %>% 
+  group_by(genid) %>%
+  summarize(gmedian=sum(grey_median*d)/sum(d))
+
+# samples abundances
+abundance_class <- read_csv(file.path(cfg$project$data,
+                           "imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>%
+  left_join(sp) %>% 
+  group_by(genid,class_phylum_detailed_copepods) %>% 
+  summarize(count=sum(d))
+
+abundance_family <- read_csv(file.path(cfg$project$data,
+                           "imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>%
+  left_join(sp) %>% 
+  group_by(genid,order_class) %>% 
+  summarize(count=sum(d))
+
+# environmental data
+envt <- read_csv(file.path(cfg$project$data,"environment_CMEMS_model+satellite.csv")) %>% 
+  select(genid,nppv,si,po4,no3,o2,KD490,ZSD,sst,chl) %>% 
+  distinct() 
+```
+
+## Class/Phylum
+
+We only consider classes with more than 10#/L within the whole dataset and present in at least 5 samples.
+
+```{r}
+abundance_class %>% group_by(class_phylum_detailed_copepods) %>%
+  summarize(count=sum(count)) %>%
+  arrange()
+
+abundance_class %>% 
+  ungroup() %>% 
+  count(class_phylum_detailed_copepods) %>% 
+  arrange(n)
+
+# remove groups with less than 10 #/L over the whole dataset 
+abundance_class <- abundance_class %>%
+  ungroup() %>% 
+  group_by(class_phylum_detailed_copepods) %>%
+  filter(n() > 5 & sum(count) > 10) %>% 
+  pivot_wider(names_from="class_phylum_detailed_copepods",values_from="count",values_fill=0) 
+```
+
+Hellinger transformation:
+
+```{r}
+# Hellinger transformation for abundances
+data.h <- decostand(abundance_class[,2:ncol(abundance_class)],method="hellinger")
+data_class <- bind_cols(genid=abundance_class$genid,data.h) 
+```
+
+Let's make the dataset for the Ridge:
+
+```{r}
+grey_envt_ab_class <- left_join(envt,grey) %>% 
+  left_join(data_class) %>% 
+  # remove samples with NA values (i.e. 13 samples)
+  drop_na() %>% 
+  # remove one outlier in Si (x3 the highest other values), otherwise it will drive the scaling
+  filter(si < 300) %>% 
+  # need to be on the same scale for comparison -> handled by cv.glmnet but easier to do it for plotting comparison of effects
+  mutate(across(-c(gmedian, genid), ~ (.-min(.)) / (max(.) - min(.)))) 
+```
+
+Ridge model:
+
+```{r}
+set.seed(123)
+
+# Exclude 'sampleid' and 'gmedian' columns
+X <- as.matrix(grey_envt_ab_class %>% select(-gmedian, -genid))
+
+# Response variable
+y <- grey_envt_ab_class$gmedian
+
+# Fit Ridge regression model with cross-validation to find optimal lambda
+ridge_model <- cv.glmnet(X, y, alpha = 0)
+
+# Plot cross-validation results to visualize the optimal lambda
+# plot(ridge_model)
+
+y_pred <- predict(ridge_model, newx = X, s = "lambda.min")
+r_squared <- 1 - sum((y - y_pred)^2) / sum((y - mean(y))^2)
+r_squared
+
+# Extract coefficients for the optimal lambda
+coef_ridge <- coef(ridge_model, s = "lambda.min")
+coef_tibble <- as_tibble(as.matrix(coef_ridge), rownames = "variable") %>%
+  rename(coefficient = `lambda.min`) %>%
+  filter(variable != "(Intercept)")  # Optionally exclude the intercept
+  
+# Plot coefficients with ggplot
+ridge_class <- ggplot(coef_tibble, aes(x = reorder(variable, coefficient), y = coefficient, color = coefficient)) +                              # Add points
+  geom_segment(aes(x = variable, xend = variable, y = 0, yend = coefficient),  # Add line to 0
+               color = "gray50") +
+  geom_point(size = 4) + 
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +  # Color scale
+  coord_flip() +                                    # Flip coordinates for better readability
+  labs(title = "", 
+       x = "", 
+       y = "Ridge coefficient value") +
+  theme_minimal() + 
+  theme(legend.position="none",
+        text=element_text(size=12))
+ridge_class
+```
+
+## Order
+
+```{r}
+abundance_family %>% group_by(order_class) %>%
+  summarize(count=sum(count)) %>%
+  arrange()
+
+# remove groups with less than 10 #/L over the whole dataset and 5 samples
+abundance_family <- abundance_family %>% group_by(order_class) %>%
+  filter(n() > 5 & sum(count) > 10) %>% 
+  pivot_wider(names_from="order_class",values_from="count",values_fill=0) 
+```
+
+Hellinger transformation:
+
+```{r}
+# Hellinger transformation for abundances
+data.h <- decostand(abundance_family[,2:ncol(abundance_family)],method="hellinger")
+data_family <- bind_cols(genid=abundance_family$genid,data.h) 
+```
+
+Let's make the dataset for the Ridge:
+
+```{r}
+grey_envt_ab_family <- left_join(envt,grey) %>% 
+  left_join(data_family) %>% 
+  filter(si < 300) %>%
+  # remove samples with NA values (i.e. 13 samples)
+  drop_na() %>% 
+  mutate(across(-c(gmedian, genid), ~ (.-min(.)) / (max(.) - min(.)))) 
+```
+
+Ridge model:
+
+```{r}
+set.seed(123)
+
+# Exclude 'sampleid' and 'gmedian' columns
+X <- as.matrix(grey_envt_ab_family %>% select(-gmedian, -genid))
+
+# Response variable
+y <- grey_envt_ab_family$gmedian
+
+# Fit Ridge regression model with cross-validation to find optimal lambda
+ridge_model <- cv.glmnet(X, y, alpha = 0)
+
+# Plot cross-validation results to visualize the optimal lambda
+# plot(ridge_model)
+
+y_pred <- predict(ridge_model, newx = X, s = "lambda.min")
+r_squared <- 1 - sum((y - y_pred)^2) / sum((y - mean(y))^2)
+r_squared
+
+# Extract coefficients for the optimal lambda
+coef_ridge <- coef(ridge_model, s = "lambda.min")
+coef_tibble <- as_tibble(as.matrix(coef_ridge), rownames = "variable") %>%
+  rename(coefficient = `lambda.min`) %>%
+  filter(variable != "(Intercept)")  # Optionally exclude the intercept
+  
+# Plot coefficients with ggplot
+ridge_family <- ggplot(coef_tibble, aes(x = reorder(variable, coefficient), y = coefficient, color = coefficient)) +                              # Add points
+  geom_segment(aes(x = variable, xend = variable, y = 0, yend = coefficient),  # Add line to 0
+               color = "gray50") +
+  geom_point(size = 4) + 
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +  # Color scale
+  coord_flip() +                                    # Flip coordinates for better readability
+  labs(title = "", 
+       x = "", 
+       y = "Ridge coefficient value") +
+  theme_minimal() + 
+  theme(legend.position="none",
+        text=element_text(size=12))
+ridge_family
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"FigSX_ridge_family.tiff"),dpi=300,width=5,height=7,scale=1.35)
+```
+
+# Summary graph
+
+```{r}
+spobj_mean_envt <- left_join(envt,distinct(sp,genid,latitude)) %>% 
+  left_join(grey)
+```
+
+```{r}
+both_binned <- read_csv(file.path(cfg$project$data,
+                           "imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>%
+  left_join(sp) %>% 
+  group_by(genid,latitude) %>% 
+  summarize(gmedian=sum(d*grey_median)/sum(d)) %>% 
+  right_join(envt) %>% 
+  drop_na() %>% 
+  mutate(latitude=abs(latitude)) %>% 
+  # Bin euphotic depth into 2500 intervals and latitude into 20 intervals
+  mutate(
+    zsd_bin = cut(ZSD, breaks = seq(0,80, by = 15), include.lowest = TRUE, right = FALSE),
+    lat_bin = cut(abs(latitude), breaks = seq(0,90, by = 15), include.lowest = TRUE, right = FALSE)
+  ) %>%
+  # Calculate the midpoint of each bin for both concentration and latitude
+  mutate(
+    zsd_mid = as.numeric(str_split_i(gsub("\\[|\\)", "", zsd_bin),",",1)),
+    lat_mid = as.numeric(str_split_i(gsub("\\[|\\)", "", lat_bin),",",1))
+  ) %>%
+  # Summarize gmedian by averaging within each bin
+  group_by(zsd_mid, lat_mid) %>%
+  summarize(
+    avg_gmedian = mean(gmedian, na.rm = TRUE),
+    n=n(),
+    .groups = 'drop'
+  ) 
+```
+
+```{r}
+fitted_surface <- surf.ls(2, both_binned$lat_mid, both_binned$zsd_mid, 
+                          both_binned$avg_gmedian)
+# compute the values at given points on a grid
+values_on_grid <- trmat(fitted_surface, min(both_binned$lat_mid), max(both_binned$lat_mid), min(both_binned$zsd_mid), max(both_binned$zsd_mid), 50)
+
+# plot the grid while superposing the points
+interp_plot <- ggplot() +
+  geom_raster(aes(x=x, y=y, fill=z), data=broom::tidy(values_on_grid)) +
+  geom_point( aes(x=lat_mid, y=zsd_mid, fill=avg_gmedian, size=n), shape=21, data=both_binned) +
+  #scale_fill_gradient(low = "black", high = "white") + 
+  scale_fill_viridis_c(option="A") + 
+  theme_classic() + 
+  #scale_y_reverse() + 
+  labs(x="Latitude",y="Euphotic depth (m)",
+       size="Number \nof samples",
+       fill="Average \nmedian grey") + 
+  theme(text=element_text(size=12))
+interp_plot
+```
+
+```{r}
+bot <- ridge_class + interp_plot + plot_layout(ncol=2,widths=c(1,1.25)) + 
+  plot_annotation(tag_levels = list(c("b","c"))) &  # manual tag list
+  theme(plot.tag = element_text(face = "bold"),
+        plot.tag.position = "topleft")
+bot
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"Fig6_bottom.tiff"),dpi=300,width=7,height=4,scale=1.5)
+```

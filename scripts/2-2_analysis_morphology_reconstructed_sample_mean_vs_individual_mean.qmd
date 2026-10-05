@@ -1,0 +1,198 @@
+---
+title: "Individual vs. class-based grey" # title of the notebook
+author: "" 
+date: 2026-07-27
+description: 
+    This script looks at what level is needed to get an accurate view of the community.  
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source ("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+library(ggpubr)
+```
+
+# Data
+
+Let's get the data first.
+
+```{r}
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv"))
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>%
+  select(sampleid,acquisid,grey_median,scientificname,class_phylum:family_order) %>% 
+  left_join(select(sp,sampleid,genid,acquisid,d))
+```
+
+Let's create synthetic mean grey that are associated with each scientificname and higher taxonomic levels:
+
+```{r}
+# scientificname 
+scmean <- obj %>%
+  group_by(genid,scientificname) %>%
+  summarize(sample_class_adjmean=sum(grey_median*d)/sum(d)) %>%
+  group_by(scientificname) %>% 
+  summarize(mean_scientificname=mean(sample_class_adjmean))
+
+# family
+fammean <- obj %>%
+  group_by(genid,family_order) %>%
+  summarize(sample_class_adjmean=sum(grey_median*d)/sum(d)) %>%
+  group_by(family_order) %>% 
+  summarize(mean_family=mean(sample_class_adjmean))
+
+# order
+ordermean <- obj %>%
+  group_by(genid,order_class) %>%
+  summarize(sample_class_adjmean=sum(grey_median*d)/sum(d)) %>%
+  group_by(order_class) %>% 
+  summarize(mean_order=mean(sample_class_adjmean))
+
+# class
+clmean <- obj %>%
+  group_by(genid,class_phylum_detailed_copepods) %>%
+  summarize(sample_class_adjmean=sum(grey_median*d)/sum(d)) %>%
+  group_by(class_phylum_detailed_copepods) %>% 
+  summarize(mean_class=mean(sample_class_adjmean))
+
+# grouped class
+phylmean <- obj %>%
+  group_by(genid,class_phylum) %>%
+  summarize(sample_class_adjmean=sum(grey_median*d)/sum(d)) %>%
+  group_by(class_phylum) %>% 
+  summarize(mean_phylum=mean(sample_class_adjmean))
+```
+
+# 
+
+# Reconstructing a sample average grey
+
+To reconstruct a sample's mean grey level, we can use: individual levels, or associate to abundances a value per scientificname, family, order, class or phylum.
+
+This is especially important when modelling, where you cannot model an infinite number of classes.
+
+```{r}
+fake <- obj %>% 
+  # add all the synthetic grey means 
+  left_join(scmean) %>% 
+  left_join(fammean) %>%
+  left_join(ordermean) %>%
+  left_join(clmean) %>%
+  left_join(phylmean) %>%
+  # calculate the reconstructed sample mean grey for each 
+  pivot_longer(c(grey_median,mean_phylum,mean_class,mean_order,mean_family,mean_scientificname),names_to="base",values_to="value") %>% 
+  group_by(genid,base) %>% 
+  summarize(reconstructed=sum(value*d)/sum(d)) %>%
+  pivot_wider(names_from="base",values_from="reconstructed") %>%
+  # associate to each real sample mean grey (grey_median) the reconstructed ones
+  pivot_longer(mean_class:mean_scientificname,names_to="base",values_to="reconstructed")
+
+# plot 
+fake %>% 
+  mutate(base=factor(base,levels=c("mean_phylum","mean_class","mean_order","mean_family","mean_scientificname"))) %>%
+  ggplot(aes(x=grey_median,y=reconstructed,color=base)) +
+  geom_point() +
+  geom_abline(color="grey") + 
+  #stat_regline_equation() + 
+  stat_cor(aes(label = ..rr.label..), label.x = 180, label.y = 140) +  
+  geom_smooth(se=FALSE,color="black",method="lm") + 
+  facet_wrap(.~base) + 
+  theme_classic() + 
+  theme(legend.position="none")
+```
+
+This shows 2 things:
+
+-   first, there is an important difference between real sample average grey, and reconstructed ones, even at the scientificname level, this shows important intra-class and individual level variation
+
+-   second, using scientificname and family does not change much in terms of accuracy, and there is another drop of accuracy when using order, class or phylum
+
+```{r}
+# plot 
+fake %>% 
+  mutate(base=factor(base,levels=c("mean_phylum","mean_class","mean_order","mean_family","mean_scientificname"))) %>%
+  filter(base %in% c("mean_scientificname","mean_class")) %>% 
+  mutate(base=if_else(base=="mean_scientificname","Scientific Name","Class/Phylum")) %>% 
+  ggplot(aes(x=grey_median,y=reconstructed)) +
+  geom_point() +
+  geom_abline(color="grey") + 
+  #stat_regline_equation() + 
+  stat_cor(aes(label = ..rr.label..), label.x = 190, label.y = 160) +  
+  geom_smooth(se=FALSE,color="black",method="lm") + 
+  facet_wrap(.~base,ncol=2) + 
+  theme_classic() + 
+  theme(legend.position="none",
+        text=element_text(size=15)) + 
+    labs(x="Organism-based sample average gray",
+         y="Taxonomic-based sample average grey")
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"FigSXa_reconstructed_averages.tiff"),dpi=300,width=7,height=4)
+```
+
+We can have a look at it by biomes and oceans:
+
+```{r}
+sps <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples_marine_regions+daytime.csv"))
+
+fake %>% 
+  left_join(sps) %>% 
+  ggplot(aes(x=grey_median,y=reconstructed,color=base)) +
+  geom_abline() + 
+  geom_point() +
+  geom_smooth(se=FALSE,color="grey") + 
+  facet_grid(base~biome) + 
+  theme_classic() + 
+  theme(legend.position="none")
+
+fake %>% 
+  left_join(sps) %>% 
+  ggplot(aes(x=grey_median,y=reconstructed,color=base)) +
+  geom_abline() + 
+  geom_point() +
+  geom_smooth(se=FALSE,color="grey") + 
+  facet_grid(base~ocean_seas) + 
+  theme_classic() + 
+  theme(legend.position="none")
+```

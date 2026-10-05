@@ -1,0 +1,261 @@
+---
+title: "Prediction maps" # title of the notebook
+author: "" 
+date: 2026-07-20
+description: 
+    This code plots the outputs from Cephalopod using the Cephaloplot package. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+# packages
+source(file.path(cfg$shared$cephaloplot,"functions/required_packages.R"))
+
+# functions 
+source(file.path(cfg$shared$cephaloplot,"functions/extract.R")) # predictor categories
+source(file.path(cfg$shared$cephaloplot,"functions/categories.R")) # predictor categories
+source(file.path(cfg$shared$cephaloplot,"functions/plot.R")) # predictor categories
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# path to the data 
+project_wd <- file.path(cfg$shared$cephalopod,"output/")
+#FOLDER_NAME="official_com_class"
+FOLDER_NAME="ZooTransparency"
+
+
+# observations 
+df_obs_all <- extract_observations(project_wd,FOLDER_NAME,
+                                   SUBFOLDER_NAME="all")
+df_obs_cop <- extract_observations(project_wd,FOLDER_NAME,
+                                   SUBFOLDER_NAME="Copepoda")
+df_obs_app <- extract_observations(project_wd,FOLDER_NAME,
+                                   SUBFOLDER_NAME="Appendicularia")
+
+# performance
+perf_all <- extract_performance(project_wd,FOLDER_NAME,
+                                SUBFOLDER_NAME="all")
+perf_cop <- extract_performance(project_wd,FOLDER_NAME,
+                                SUBFOLDER_NAME="Copepoda")
+perf_app <- extract_performance(project_wd,FOLDER_NAME,
+                                SUBFOLDER_NAME="Appendicularia")
+
+
+# predictions
+df_day_all <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="all",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=2)
+df_day_cop <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="Copepoda",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=2)
+df_day_app <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="Appendicularia",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=2)
+
+df_night_all <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="all",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=1)
+df_night_cop <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="Copepoda",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=1)
+df_night_app <- extract_prediction(project_wd,FOLDER_NAME,
+                                 SUBFOLDER_NAME="Appendicularia",
+                                 ensemble=TRUE,model=c("BRT","RF"),
+                                 m=1:12,f=1)
+
+# land 
+df_land <- extract_land(project_wd,FOLDER_NAME)
+```
+
+# Model performance
+
+------------------------------------------------------------------------
+
+```{r}
+# plot performance for all models - combined metrics (threshold_size=0 removes it)
+plot_performance(perf_all,plot_type="combined",title="Community")
+plot_performance(perf_cop,plot_type="combined",title="Copepoda")
+plot_performance(perf_app,plot_type="combined",title="Appendicularia")
+```
+
+# Predictions
+
+------------------------------------------------------------------------
+
+Limits for the transparency colorbars:
+
+```{r}
+# regular map of ensemble model (default: plot the predicted values with no uncertainty)
+alllim <- round(quantile(df_day_all$predictedvalue,c(0.025,0.975),na.rm=TRUE)/5)*5
+coplim <- round(quantile(df_day_cop$predictedvalue,c(0.025,0.975),na.rm=TRUE)/5)*5
+applim <- round(quantile(df_day_app$predictedvalue,c(0.025,0.975),na.rm=TRUE)/5)*5
+```
+
+## Day
+
+```{r}
+# threshold: mean of standard deviations + standard deviation of standard deviations 
+allthreshold=mean(df_day_all$predictedsd) + 1*sd(df_day_all$predictedsd)
+allperc_below_threshold <- length(which(df_day_all$predictedsd < allthreshold))*100/nrow(df_day_all) # percentage of values below threshold 
+copthreshold=mean(df_day_cop$predictedsd) + 1*sd(df_day_cop$predictedsd)
+copperc_below_threshold <- length(which(df_day_cop$predictedsd < copthreshold))*100/nrow(df_day_cop) # percentage of values below threshold 
+appthreshold=mean(df_day_app$predictedsd) + 1*sd(df_day_app$predictedsd)
+appperc_below_threshold <- length(which(df_day_app$predictedsd < appthreshold))*100/nrow(df_day_app) # percentage of values below threshold 
+
+
+# here xlab is used as the threshold label 
+plot_all <- plot_prediction(output=df_day_all, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(170,190),
+                xlab=paste0("sd > ", round(allthreshold,2), " (~ ", 100-round(allperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=allthreshold,
+                ycolors=c("#000000", "#666666","#CCCCCC"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="red",
+                correct.lightness=TRUE,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="left",latitude_step=5,
+                legend_adjust = -20)
+plot_all
+
+plot_cop <- plot_prediction(output=df_day_cop, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(170,190),
+                xlab=paste0("sd > ", round(allthreshold,2), " (~ ", 100-round(allperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=allthreshold,
+                ycolors=c("#000000", "#666666","#CCCCCC"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="red",
+                correct.lightness=TRUE,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="left",latitude_step=4)
+plot_cop
+
+plot_app <- plot_prediction(output=df_day_app, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(215,225),
+                #ylim = applim,
+                xlab=paste0("sd > ", round(appthreshold,2), " (~ ", 100-round(appperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=appthreshold,
+                ycolors=c("#000000", "#666666","#CCCCCC"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="red",
+                correct.lightness=TRUE,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="left", latitude_step=3,
+                colorbar_step=5)
+plot_app
+```
+
+## Anomaly
+
+```{r}
+# threshold: mean of standard deviations + standard deviation of standard deviations 
+allthreshold=mean(sqrt(df_night_all$predictedsd^2+df_day_all$predictedsd^2)) + 1*sd(sqrt(df_night_all$predictedsd^2+df_day_all$predictedsd^2))
+allperc_below_threshold <- length(which(sqrt(df_night_all$predictedsd^2+df_day_all$predictedsd^2) < allthreshold))*100/nrow(df_day_all) # percentage of values below
+
+
+anomaly_all <- plot_prediction(output=df_day_all, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(-4,4),
+                xlab=paste0("sd > ", round(allthreshold,2), " (~ ", 100-round(allperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=allthreshold,
+                ycolors=c("blue","white","red"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="black",
+                anomaly=TRUE,anomaly_data=df_night_all,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="right",latitude_step=0.5)
+anomaly_all
+
+copthreshold=mean(sqrt(df_night_cop$predictedsd^2+df_day_cop$predictedsd^2)) + 1*sd(sqrt(df_night_cop$predictedsd^2+df_day_cop$predictedsd^2))
+copperc_below_threshold <- length(which(sqrt(df_night_cop$predictedsd^2+df_day_cop$predictedsd^2) < copthreshold))*100/nrow(df_day_cop) # percentage of values below
+
+
+anomaly_cop <- plot_prediction(output=df_day_cop, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(-4,4),
+                xlab=paste0("sd > ", round(copthreshold,2), " (~ ", 100-round(copperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=copthreshold,
+                ycolors=c("blue","white","red"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="black",
+                anomaly=TRUE,anomaly_data=df_night_cop,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="right",latitude_step=1)
+anomaly_cop
+
+appthreshold=mean(sqrt(df_night_app$predictedsd^2+df_day_app$predictedsd^2)) + 1*sd(sqrt(df_night_app$predictedsd^2+df_day_app$predictedsd^2))
+appperc_below_threshold <- length(which(sqrt(df_night_app$predictedsd^2+df_day_app$predictedsd^2) < appthreshold))*100/nrow(df_day_app) # percentage of values below
+
+
+anomaly_app <- plot_prediction(output=df_day_app, 
+                plot_uncertainty="stippling",uncertainty="predictedsd",
+                ylim=c(-4,4),
+                xlab=paste0("sd > ", round(appthreshold,2), " (~ ", 100-round(appperc_below_threshold,1), "%)"),
+                ylab="",
+                threshold=appthreshold,
+                ycolors=c("blue","white","red"),
+                stippling_bin=2.5,stippling_size=0.5,stippling_color="black",
+                anomaly=TRUE,anomaly_data=df_night_app,
+                latitude_profile=TRUE,legend_position="bottom",
+                latitude_position="right",latitude_step=0.3)
+anomaly_app
+```
+
+```{r}
+library(cowplot)
+x=plot_grid(plot_all,anomaly_all, plot_cop, anomaly_cop, plot_app, anomaly_app,nrow=3,ncol=2)
+x
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"Fig6_model_top.tiff"),dpi=300,width=8,height=6,scale=1.5)
+```

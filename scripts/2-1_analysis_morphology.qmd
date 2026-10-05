@@ -1,0 +1,318 @@
+---
+title: "Zooplankton morphology: transparency and size" # title of the notebook
+author: ""
+date: 2026-09-27
+description: 
+    This script looks at the importance of transparency in terms of morphological variation, its relationship with size and the pertinence of individual traits. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+
+# visualization
+library(morphr)
+library(ggcorrplot)
+library(heatmaply)
+
+# PCA
+library(FactoMineR)
+library(factoextra)
+library(bestNormalize)
+
+library(ggrepel)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# samples
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv"))
+
+# objects 
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>%
+  left_join(select(sp,sampleid,acquisid,d)) # %>% 
+  #left_join(zoopath) %>% 
+  #mutate(path=paste0(path,"/",orig_file_name)) 
+```
+
+Note that the zoopath and morphological space requires to have access to the images, and is thus not included in here.
+
+# Transparency and size
+
+------------------------------------------------------------------------
+
+## Global correlations
+
+```{r}
+pearson_test <- psych::corr.test(obj[, morph_cols], method = "pearson")
+spearman_test <- psych::corr.test(obj[, morph_cols], method = "spearman")
+
+
+# pearson
+heatmaply_cor(
+  cor(as.matrix(obj[,9:39]),method="pearson"),
+  xlab = "Features",
+  ylab = "Features",
+  grid_color="white"
+) 
+
+# spearman
+heatmaply_cor(
+  cor(as.matrix(obj[,9:39]),method="spearman"),
+  xlab = "Features",
+  ylab = "Features",
+  grid_color="white",
+  show_dendrogram = c(FALSE,TRUE)     # Remove column dendrogram and keep row dendrogram
+) 
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"FigSX_spearman_correlation.tiff"),dpi=300,width=8,height=6.5)
+```
+
+## Area vs. grey median per taxonomic classes
+
+```{r}
+# per taxonomic class
+correlations <- obj %>%
+  group_by(class_phylum) %>%
+  summarize(correlation = cor(grey_median, size_area, method = "spearman"),
+            n=n()) 
+
+# plot
+ggplot(correlations, aes(x = reorder(class_phylum, correlation), y = correlation)) +
+  geom_col(aes(fill = correlation), width = 0.7) +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "white", high = "#B2182B",
+    limits = c(-1, 1),
+    guide = "none"
+  ) +
+
+  # Taxonomic group names next to bar
+  geom_text(
+    aes(
+      label = class_phylum,
+      hjust = ifelse(correlation > 0, -0.1, 1.1)
+    ),
+    size = 3.2
+  ) +
+
+  # Right-aligned `n` at far right
+  geom_text(
+    aes(
+      x = reorder(class_phylum, correlation),
+      y = 0.8,  # move farther right if needed
+      label = paste0(n, " images")
+    ),
+    hjust = 1,
+    size = 3,
+    color = "gray30"
+  ) +
+
+  coord_flip(clip = "off") +
+  labs(
+    x = NULL,
+    y = "Spearman correlation coefficient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 12, margin = margin(t = 10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 70, 10, 10)  # add more right margin
+  ) +
+  scale_y_continuous(
+    limits = c(-1, 0.8),  # expand past the max bar
+    expand = expansion(mult = c(0, 0))
+  )
+```
+
+```{r}
+ggsave(file.path(cfg$project$figures,"FigSX_size_regression_taxo.tiff"),dpi=300,width=8,height=5.5)
+```
+
+# Morphological variation
+
+------------------------------------------------------------------------
+
+Values are transformed with Yeo-Johnson for normality before the PCAs:
+
+```{r}
+obj.mat=select(obj,objid,grey_mean:shape_perimferet) %>% 
+  column_to_rownames(var="objid") %>% 
+  mutate_all(~predict(yeojohnson(.)))
+```
+
+## PCA: all variables
+
+Weighted principal component analysis:
+
+```{r}
+morpho.pca <- PCA(obj.mat,graph=FALSE,row.w=obj$d)
+```
+
+Contributions of the 4 first axis:
+
+```{r}
+morpho.pca[["eig"]][1:4,2]
+```
+
+Top 5 contributors to axis 1 and axis 2:
+
+```{r}
+# pc1
+sort(morpho.pca[["var"]][["contrib"]][,1],decreasing=TRUE) %>% head(10)
+# pc2
+sort(morpho.pca[["var"]][["contrib"]][,2],decreasing=TRUE) %>% head(10)
+```
+
+Morphospace visualization: there are 533 images over the 572856 for which we do not have the jpg file associated, so these are removed or risk making the code fail.
+
+```{r}
+# remove absent images
+missing_files=file.exists(obj$path)
+table(missing_files)
+obj.mat <- obj.mat[missing_files==TRUE,]
+d=obj$d[missing_files==TRUE]
+
+# pca
+set.seed(123)
+pca <- morphospace(obj.mat,weights=d)
+
+# Stock descriptors scores
+descriptors_scores = as.data.frame(pca$var$coord)
+descriptors_scores <- rownames_to_column(descriptors_scores, "descriptors")
+
+# Add contributions
+descriptors_scores$Contrib12 = pca$var$contrib[,c(1)] + pca$var$contrib[,c(2)]
+descriptors_scores$Contrib34 = pca$var$contrib[,c(3)] + pca$var$contrib[,c(4)]
+
+# add cos2
+descriptors_scores$cos12 = pca$var$cos2[,c(1)] + pca$var$cos2[,c(2)]
+descriptors_scores$cos34 = pca$var$cos2[,c(3)] + pca$var$cos2[,c(4)]
+
+# Plot objects on the two plan of the morphological space  :
+# First plan of morphological space (axes 1 and 2)
+# ggmorph_tile is the function that take path of images to plot them on the PCA (you can choose the numer of cells, the number of images you pick and the scale of image representation)
+
+set.seed(224)
+a <- ggmorph_tile(pca, obj$path[missing_files==TRUE],fun=function(x) img_chop(x,b=31), steps=11, n_imgs=8, scale=0.007)+
+  # only the descriptors with cos2 > 0.9
+  geom_segment(aes(x = 0, y = 0, xend = Dim.1*5, yend = Dim.2*5), size = 0.5, alpha= 0.9, arrow=arrow(length=unit(0.2,"cm")), data =filter(descriptors_scores,cos12 > 0.69)) +
+  geom_text_repel(aes(x = Dim.1*5, y = Dim.2*5, label = descriptors, size = Contrib12), fontface =1, alpha = 1, segment.alpha = 0.2, data=filter(descriptors_scores,cos12 > 0.69))+
+  theme_bw(base_size=12)+
+  theme(legend.position="none")+
+  scale_size(range=c(3, 6))
+plot(a)
+```
+
+```{r}
+ggsave("../figures/Fig3a_PCA_all.tiff",dpi=300,width=7,height=6)
+```
+
+## PCA: transparency variables
+
+```{r}
+obj.mat=select(obj.mat,starts_with("grey")) 
+
+# pca 
+morpho.pca <- PCA(obj.mat,graph=FALSE,row.w=obj$d)
+```
+
+Contributions of the 4 first axis:
+
+```{r}
+morpho.pca[["eig"]][1:4,2]
+```
+
+Top 5 contributors to axis 1 and axis 2:
+
+```{r}
+# pc1
+sort(morpho.pca[["var"]][["contrib"]][,1],decreasing=TRUE) %>% head(10)
+# pc2
+sort(morpho.pca[["var"]][["contrib"]][,2],decreasing=TRUE) %>% head(10)
+```
+
+```{r}
+# pca
+set.seed(123)
+pca <- morphospace(obj.mat,weights=d)
+
+# Stock descriptors scores
+descriptors_scores = as.data.frame(pca$var$coord)
+descriptors_scores <- rownames_to_column(descriptors_scores, "descriptors")
+
+# Add contributions
+descriptors_scores$Contrib12 = pca$var$contrib[,c(1)] + pca$var$contrib[,c(2)]
+descriptors_scores$Contrib34 = pca$var$contrib[,c(3)] + pca$var$contrib[,c(4)]
+
+# add cos2
+descriptors_scores$cos12 = pca$var$cos2[,c(1)] + pca$var$cos2[,c(2)]
+descriptors_scores$cos34 = pca$var$cos2[,c(3)] + pca$var$cos2[,c(4)]
+
+# Plot objects on the two plan of the morphological space  :
+# First plan of morphological space (axes 1 and 2)
+# ggmorph_tile is the function that take path of images to plot them on the PCA (you can choose the numer of cells, the number of images you pick and the scale of image representation)
+
+set.seed(224)
+a <- ggmorph_tile(pca, obj$path[missing_files==TRUE],fun=function(x) img_chop(x,b=31), steps=11, n_imgs=8, scale=0.007)+
+  # only the descriptors with cos2 > 0.9
+  geom_segment(aes(x = 0, y = 0, xend = Dim.1*5, yend = Dim.2*5), size = 0.5, alpha= 0.9, arrow=arrow(length=unit(0.2,"cm")), data =filter(descriptors_scores,cos12 > 0.7)) +
+  geom_text_repel(aes(x = Dim.1*5, y = Dim.2*5, label = descriptors, size = Contrib12), fontface =1, alpha = 1, segment.alpha = 0.2, data=filter(descriptors_scores,cos12 > 0.7))+
+  theme_bw(base_size=12)+
+  theme(legend.position="none")+
+  scale_size(range=c(3, 6))
+plot(a)
+```
+
+```{r}
+ggsave("../figures/Fig3b_PCA_grey.tiff",dpi=300,width=7,height=6)
+```

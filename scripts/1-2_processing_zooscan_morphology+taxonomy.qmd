@@ -1,0 +1,243 @@
+---
+title: "Zooscan objects: morphology and taxonomy" # title of the notebook
+author: "" 
+date: 2026-08-03
+description: 
+    This script quality controls and add taxonomic groups to the zooscan objects. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+library(worrms)
+```
+
+# Taxonomy
+
+------------------------------------------------------------------------
+
+```{r}
+taxobj <- read_csv(file.path(cfg$project$data,"taxonomy_list.csv"))
+```
+
+Manually assign those without a Worms match: if there is a worms ID with the parent, use that one, otherwise, manually assign them:
+
+-   Acantharea can be matched to Rhizaria
+
+-   Thecosomata can be matched to Pteropoda
+
+-   Coscinodiscids can be matched to Coscinodiscophycidae
+
+```{r}
+filter(taxobj,is.na(aphia_id)) %>% arrange(taxotype)
+
+taxobj <- taxobj %>% 
+  mutate(scientificID=case_when(name=="Acantharea"~582420,
+                                name=="Thecosomata"~325345,
+                                name=="Coscinodiscids"~148971,
+                                is.na(aphia_id)~parent_aphia_id,
+                                TRUE~aphia_id),
+         scientificname=case_when(name=="Acantharea"~"Rhizaria",
+                                  name=="Thecosomata"~"Pteropoda",
+                                  name=="Coscinodiscids"~"Coscinodiscophycidae",
+                                  is.na(aphia_id)~parent_name,
+                                  TRUE~name))
+```
+
+## Worms
+
+Get the taxonomy from Worms: the function wm_record return errors if the number of taxon asked is too big, 50 seems to work fine
+
+```{r}
+ids = unique(taxobj$scientificID)
+step <- 50
+chunks <- split(ids, ceiling(seq_along(ids) / step))
+
+worms <- map_dfr(chunks, \(x) {
+  tryCatch(
+    wm_record(x),
+    error = function(e) {
+      message("Failed chunk starting with ID ", x[1])
+      tibble()
+    }
+  )
+})
+```
+
+Add the lineage to our taxonomy:
+
+```{r}
+taxobj <- taxobj %>% 
+  left_join(select(worms,scientificID=AphiaID,scientificname,rank,kingdom:genus))
+```
+
+## Homogeneous taxonomy
+
+We need the taxonomy to be approximately homogeneous across projects, but because not everyone classifies similarly or even has the same taxonomical knowledge, it is hard to assess. For the PIQv projects, including Tara Oceans, they have developped a list of homogenenous taxa, meaning these are mutually exclusive, and also indicated which taxon are not homogeneous and just an addition from some annotators that either had the time, the envy, or the knowledge to classify in a more precise way. However, this is based on an old taxonomic classification, so here it will be used just for a coupe of categories and we mitigate this homogeneity problem by:
+
+-   in the rest of the scripts running analysis on order or class/phylum levels rather than individual classes
+-   some taxa are associated with Subphylum or Gigaclass, and are used as class names to avoid losing too much precision
+-   some of taxa are aggregated based on the homogeneous taxonomy used in the Tara project (ex: all Sagittoida will be assigned to Chaetognatha) and when they are also fairly homogeneous in transparency
+
+### Precision
+
+Worms gives you the rank of a taxon (detailed) and its lineage (fixed: kingdom, phylum, class, order, family, genus). Some adjustments can help with precision in the analysis:
+
+-   Crustacea has a rank of subphylum for Arthropoda =\> we can use it as class name to be more precise, otherwise they would be matched to Arthropoda
+-   Actinopterygii is similar as gigaclass, use it as class instead of Chordata which is high level
+-   Rhizaria (Acantharia and other Rhizaria but not Foraminifera) is also a subphylum and used as class instead of Harosa
+-   Anthozoa are a subphylum of Cnidaria
+
+```{r}
+taxobj <- taxobj %>%
+    mutate(class_phylum=ifelse(rank %in% c("Gigaclass","Subphylum"),scientificname,class))
+```
+
+### Aggregation
+
+Aggregation happens for:
+
+-   groups for which there is only one class + the phylum category (ex: all Chaetognatha are either in the class Sagittoidea, or the phylum Chaetognatha) = Annelida, Chaetognatha, Cyanobacteria, Foraminifera
+-   groups that are consistent taxonomically and morphologically:
+    -   Cnidaria - cannot be grouped because too different in terms of transparency: Anthozoa (#8,mean=66), Cnidaria (#26,mean=156), Scyphozoa (#61,mean=201), Hydrozoa (#4441,mean=213)
+    -   Echinodermata - can be grouped: Asteroidea (#465,mean=205), Echinodermata (#169, mean=210), Echinoidea (#91,mean=212), Ophiuroidea (#1246,mean=218)
+    -   Harosa - not grouped (varied): Bacillariophyceae (#125,mean=223), Dinophyceae (#2406,mean=234)
+-   names that do not have a class associated, get their phylum (Mollusca, Bryozoa, Cnidaria, Ctenophora)
+-   groups that are homogeneous for Tara Oceans: Radiozoans are grouped (Spumellaria, Collozoum, Collodaria) at the Rhizaria level
+
+```{r}
+taxobj %>% group_by(phylum) %>% filter(n_distinct(class)==2) %>% arrange(phylum)
+
+taxobj <- taxobj %>% 
+  # only one class + the phylum level
+  group_by(phylum) %>% 
+  mutate(class_phylum=case_when(n_distinct(class)==2~phylum,
+                                TRUE ~ class_phylum)) %>% 
+  ungroup() %>% 
+  # taxo/morpho similar groups
+  mutate(class_phylum=case_when(phylum=="Echinodermata"~"Echinodermata",
+                                # homogeneous Tara groups
+                                class=="Polycystina"~"Rhizaria",
+                                # phylum if still absent
+                                is.na(class_phylum)~phylum,
+                                TRUE ~ class_phylum)) %>% 
+  # scientificname if phylum absent (Rhizaria/Harosa)
+  mutate(class_phylum=if_else(is.na(class_phylum),scientificname,class_phylum))
+```
+
+Add an extra column with details of the Copepods orders:
+
+```{r}
+taxobj <- taxobj %>% 
+  mutate(class_phylum_detailed_copepods=case_when(class_phylum=="Copepoda" & is.na(order)~"Copepoda",
+                                                  class_phylum=="Copepoda"~order,
+                                                  TRUE ~ class_phylum)) %>% 
+  mutate(order_class=if_else(is.na(order),class_phylum,order),
+         family_order=if_else(is.na(family), order_class, family))
+```
+
+# Morphology
+
+------------------------------------------------------------------------
+
+## Data
+
+```{r}
+obj <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho.csv"))
+nrow(obj)
+```
+
+## Quality control
+
+### Validated images
+
+Dubious images are removed.
+
+```{r}
+table(obj$classif_qual)
+obj <- filter(obj,classif_qual=="V")
+nrow(obj)
+```
+
+### Zooplankton only
+
+We are only interested in plankton so we remove all parts and non-plankton organisms:
+
+```{r}
+taxo_to_remove <- "artefact|badfocus|detritus|bubble|damaged|dead|empty|fiber|like|t001|t002|t003|t004|t005|t006|t007|t008|t009|t010|t011|t012|t013|t014|t015|t016|t017|t018|t019|t020|t021|seaweed|borax|sand|aggregate|clump|duplicate|elongated stick|feces|filament|fluffy|grey|house|leg|light|line|tentacle|molt|ovoid|puff|side|small|solitary|sphere|star|bottom|turbid|unknown|very|compact|t016|dark|glue|not-living|shadow|badfocus-to-turbid|sand|Insecta|Clanoptilus|Badessa|Biota|part|egg|head|nucleus|scale|tail|trunk|egg 1 temp|invisible membrane|wing|with membrane|antenna|egg unkn temp|bract|eudoxie|gonophore|nectophore|posterior|cirrus|comb|pharynx|division|endostyle|body|siphosome|spines|colony|multiple organisms|multiple|multiple+others|Calanidae\\+inter\\+ellobiopsis|gelatinous|living|other|othertocheck|darksphere|plastic|cut|exuviae|Trochophora"
+
+obj <- filter(obj,!(str_detect(name,taxo_to_remove)))
+nrow(obj)
+```
+
+## Taxonomy addition
+
+```{r}
+obj <- left_join(obj,taxobj)
+```
+
+## Phytoplankton
+
+Cyanobacteria are hard to distinguish from filaments, and were only classified during the Tonga campaign because their presence was known. To avoid unbalancing the dataset, they will be removed:
+
+```{r}
+obj <- filter(obj, phylum != "Cyanobacteria" | is.na(phylum))
+nrow(obj)
+```
+
+Similarly, since we are looking at zooplankton and not phytoplankton which are on the smaller size for the Zooscan, we will remove any Bacillariophyceae or Dinophyceae.
+
+```{r}
+obj <- filter(obj, !(class %in% c("Bacillariophyceae","Dinophyceae")))
+nrow(obj)
+```
+
+# Export and Disconnect
+
+------------------------------------------------------------------------
+
+```{r}
+write_csv(obj,file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv"))
+write_csv(taxobj,file.path(cfg$project$data,"taxonomy_list_homogeneous_multiprojects.csv"))
+```

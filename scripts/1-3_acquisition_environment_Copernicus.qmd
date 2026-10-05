@@ -1,0 +1,329 @@
+---
+title: "Copernicus environmental data" # title of the notebook
+author: "" 
+date: 2026-08-07
+description: 
+    This script retrieves the Copernicus modelled and satellite data associated with our locations. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: false # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+library(reticulate)
+
+# bash 
+# conda create -n copernicusmarine
+# conda install -n copernicusmarine copernicusmarine python=3.9
+
+# python
+reticulate::use_condaenv("copernicusmarine", required = TRUE)
+reticulate::py_require("copernicusmarine")
+reticulate::py_require("xarray")
+reticulate::py_require("netCDF4")
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+We will download the following environmental data:
+
+-   Nemo Pisces Global Ocean Biogeochemistry Hindcast
+    -   chl (mg.m-3), nitrate (mmol.m-3), phosphate (mmol.m-3), silicate (mmol.m-3), nppv (mg.m-3.day-1), o2 (mmol.m-3)
+    -   years 2009 to 2023
+    -   5-150m
+    -   downloaded as separate files, then averaged over depth range
+    -   <https://data.marine.copernicus.eu/product/GLOBAL_MULTIYEAR_BGC_001_029/services>
+-   Transparency, multi-sensor (4 km), daily:
+    -   KD490 (m-1), ZSD (m)
+    -   years 2009 to 2023
+    -   downloaded as separate files
+    -   <https://data.marine.copernicus.eu/product/OCEANCOLOUR_GLO_BGC_L4_MY_009_104/services>
+-   Global Ocean Ostia SST Reprocessed All data
+    -   sst (K)
+    -   year 2009 to 2023
+    -   downloaded as separate files
+    -   <https://data.marine.copernicus.eu/product/SST_GLO_SST_L4_REP_OBSERVATIONS_010_011/services>
+
+To download only a subset of the files that corresponds to the latitude, longitude and day of the sample, we need the samples metadata.
+
+```{r}
+# samples 
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) %>% 
+  # transform date into day
+  mutate(date=as.Date(date)) %>%
+  distinct(genid,longitude,latitude,date) %>%
+  # setup strings needed for comparisons or filename 
+  mutate(numdate=str_remove_all(date,"-"),
+         date=as.character(date),
+         genid=as.character(genid)) %>% 
+  arrange(date)
+```
+
+# Lazy downloading
+
+The EU created a toolbox to access data directly through the copernicusmarine python package. It requires a username and a password for a CMEMS account, as illustrated with the ones used for example below.
+
+I tried 4 different methods:
+
+-   use copernicusmarine subset function to download a cn file per point and then read those files and average over depth =\> easy but require many API calls and download the a nc file per point
+-   use copernicus marine open_dataset to do a lazy loading call to the API for each point, process the depth weighted means and load the data to memory to make a dataframe =\> easy but require many API calls, only save the depth average output
+-   use copernicus marine open_dataset to lazy load once all the global product between minimum and maximum, select the unique points wanted and load these before or after the depth-weighted average =\> a little more complex, and longer
+-   use copernicusmarine read_dataframe to send load the data directly as a dataframe
+
+For the depth averaged data, the easiest (because no files downloaded) and fastest (lazy loading) was option 2, even if it did one API call per point. Also I did not parrallelize it because the bottleneck for me was network, not CPU. For the water transparency and sst data, the easiest was option 4.
+
+```{python}
+import numcodecs.blosc
+numcodecs.blosc.use_threads = False  # avoid blosc decompression race condition
+
+import copernicusmarine as cm
+import numpy as np
+import pandas as pd
+import xarray as xr
+from dask.diagnostics import ProgressBar
+
+# variables 
+sp=r.sp
+lon  = xr.DataArray(sp["longitude"],  dims="genid")
+lat  = xr.DataArray(sp["latitude"],  dims="genid")
+time = xr.DataArray(sp["date"], dims="genid")
+
+# data request
+username="vsonnet"
+password="CerataulinaPelagica10?"
+
+# function to calculate depth-weighted mean
+def depth_weighted_mean(ds, variables, max_depth=150):
+    """
+    Mean over 0-max_depth, weighted by layer thickness.
+    Variables: 
+      - ds: lazy-loading connection 
+      - variables: variables to average 
+      - max_depth: maximum depth to consider 
+    """
+    depth = ds["depth"]
+    # calculate the midpoint between depth values (+ 0 and the max depth value) = boundary between depth levels
+    bounds = np.concatenate([[0], (depth.values[:-1] + depth.values[1:]) / 2, [depth.values[-1]]])
+    # thickness is the difference between the boundary above and below the depth level
+    thickness = xr.DataArray(np.diff(bounds), dims="depth", coords={"depth": depth})
+    thickness = thickness.where(depth <= max_depth, 0)
+    # normalize so weights sum to 1 -> weighted average, not weighted sum
+    weights = thickness / thickness.sum()
+    # calculate the weighted mean for each variable 
+    return (ds[variables] * weights).sum(dim="depth")
+```
+
+## BGC
+
+Let's first lazy download the BGC data:
+
+```{python}
+# empty list 
+data_list = []
+variables=["chl", "nppv", "si", "po4", "no3", "o2"]
+max_depth=150
+
+for j in range(len(sp)):
+  print(f"genid {j+1} of {len(sp)}")
+  ds=cm.open_dataset(
+    dataset_id="cmems_mod_glo_bgc_my_0.25deg_P1D-m",
+    minimum_longitude=sp['longitude'].iloc[j],
+    maximum_longitude=sp['longitude'].iloc[j],
+    minimum_latitude=sp['latitude'].iloc[j],
+    maximum_latitude=sp['latitude'].iloc[j],
+    minimum_depth=15,
+    maximum_depth=150,
+    start_datetime=sp['date'].iloc[j],
+    end_datetime=sp['date'].iloc[j],
+    username=username,
+    password=password
+  )
+  
+  with ProgressBar():
+    mean_pts = depth_weighted_mean(ds, variables, max_depth).load()
+  
+  # Extract variables with depth averaging
+  data_list.append({
+      'genid': sp['genid'].iloc[j],
+      'latitude_bgc': float(ds['latitude'].values.item()),  # Convert to scalar
+      'longitude_bgc': float(ds['longitude'].values.item()),  # Convert to scalar
+      'chl': float(mean_pts['chl'].values.item()),  # Mean across depth dimension
+      'nppv': float(mean_pts['nppv'].values.item()),  
+      'si': float(mean_pts['si'].values.item()),
+      'po4': float(mean_pts['po4'].values.item()),
+      'no3': float(mean_pts['no3'].values.item()),
+      'o2': float(mean_pts['o2'].values.item())
+  }) 
+  ds.close()
+
+# convert to dataframe 
+bgc_df = pd.DataFrame(data_list)
+```
+
+## Transparency
+
+233 values have a flag of 223, which means that they were interpolated. None has a flag of 1 (land).
+
+```{python}
+# empty df 
+transp_df = pd.DataFrame()
+
+for j in range(len(sp)):
+  print(f"genid {j+1} of {len(sp)}")
+  ds=cm.read_dataframe(
+    dataset_id="cmems_obs-oc_glo_bgc-transp_my_l4-gapfree-multi-4km_P1D",
+    minimum_longitude=sp['longitude'].iloc[j],
+    maximum_longitude=sp['longitude'].iloc[j],
+    minimum_latitude=sp['latitude'].iloc[j],
+    maximum_latitude=sp['latitude'].iloc[j],
+    start_datetime=sp['date'].iloc[j],
+    end_datetime=sp['date'].iloc[j],
+    username=username,
+    password=password)
+  
+  # add time, longitude, latitude 
+  ds = ds.reset_index()
+  ds['genid'] = sp['genid'].iloc[j]
+  # Extract variables with depth averaging
+  transp_df = pd.concat([transp_df,ds])
+
+# cleanup dataframe 
+transp_df=transp_df.rename(columns={"latitude": "latitude_transp", "longitude": "longitude_transp"})
+```
+
+## Temperature
+
+Note that one sample is considered on land for OSTIA and thus has no SST (-73.479667, -48.0921667, 2021-03-03). And 13 samples have a flag of 9 but it is not explicit in their documentation. Based on the location of the points (poles), I will assume it's a mistake with flag 8 for sea ice.
+
+```{python}
+# empty df 
+sst_df = pd.DataFrame()
+
+for j in range(len(sp)):
+  print(f"genid {j+1} of {len(sp)}")
+  ds=cm.read_dataframe(
+    dataset_id="METOFFICE-GLO-SST-L4-REP-OBS-SST",
+    minimum_longitude=sp['longitude'].iloc[j],
+    maximum_longitude=sp['longitude'].iloc[j],
+    minimum_latitude=sp['latitude'].iloc[j],
+    maximum_latitude=sp['latitude'].iloc[j],
+    start_datetime=sp['date'].iloc[j],
+    end_datetime=sp['date'].iloc[j],
+    username=username,
+    password=password)
+  
+  # add time, longitude, latitude 
+  ds = ds.reset_index()
+  ds['genid'] = sp['genid'].iloc[j]
+  # Extract variables with depth averaging
+  sst_df = pd.concat([sst_df,ds])
+
+# cleanup dataframe 
+sst_df=sst_df.rename(columns={"latitude": "latitude_sst", "longitude": "longitude_sst"})
+```
+
+```{python}
+result=pd.merge(sp,bgc_df,how="left")
+result=pd.merge(result,transp_df,how="left")
+result=pd.merge(result,sst_df,how="left")
+```
+
+# QC
+
+## NAs
+
+Make sure all NA values are properly labelled:
+
+```{r}
+result=py$result
+
+# if model results are 0, then data are missing 
+zero_model <- filter(result,chl==0 & si==0 & po4 == 0)
+result <- result %>% 
+  mutate_at(c("chl","nppv","si","po4","no3","o2"),
+            ~if_else(genid %in% zero_model$genid,NA_real_,.)) %>% 
+  mutate_at(c("analysed_sst","ZSD","KD490"),
+            ~if_else(is.na(.),NA_real_,.))
+```
+
+## Lat/lon
+
+Verify that latitude and longitude for all 3 datasets were not off by a large margin:
+
+```{r}
+# check latitude
+result %>% 
+  select(genid,starts_with("latitude")) %>% 
+  pivot_longer(ends_with(c("_bgc","_transp","_sst")),names_to="vars",values_to="vals") %>% 
+  mutate(diffs=abs(latitude-vals)) %>% 
+  summary()
+
+# check longitude
+result %>% 
+  select(genid,starts_with("longitude")) %>% 
+  pivot_longer(ends_with(c("_bgc","_transp","_sst")),names_to="vars",values_to="vals") %>% 
+  mutate(diffs=abs(longitude-vals)) %>% 
+  summary()
+```
+
+## SST in Celsius
+
+SST is in Kelvin so need to be adjusted:
+
+```{r}
+result <- mutate(result,sst=analysed_sst-273.15)
+```
+
+# Export
+
+```{r}
+result <- select(result,
+                 genid,longitude,latitude,date,
+                 chl:o2,
+                 KD490,ZSD,
+                 sst)
+
+write_csv(result,file.path(cfg$project$data,"environment_CMEMS_model+satellite.csv"))
+```

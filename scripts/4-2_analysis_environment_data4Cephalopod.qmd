@@ -1,0 +1,120 @@
+---
+title: "Data formatting for Cephalopod" # title of the notebook
+author: "" 
+date: 2026-07-10
+description: 
+    This script formats the data to be used in Cephalopod. 
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+#| message: false
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+# samples
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv")) 
+
+# daytime factor
+varfactor <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples_marine_regions+daytime.csv")) %>% 
+  # one summer Arctic sample is missing a day value
+  mutate(day_night=if_else(sampleid==378000027,"Day",day_night))
+
+# objects
+allobjects <- read_csv(file.path(cfg$project$data,"imagery_zooscan_objects_morpho_taxo_cleaned.csv")) %>% 
+  left_join(distinct(sp,acquisid,sampleid,genid,d,date,latitude,longitude))
+```
+
+# Formatting for samples mean
+
+Necessary input columns to Cephalopod: **"decimallatitude", "decimallongitude", "depth", "year", "month", "scientificname", "worms_id", "measurementvalue", "measurementunit", "taxonrank"**
+
+Note that depth is only used for excluding or including samples so we will set the same depth for all samples, Cephalopod does not output 3D maps.
+
+All communities within 1x1 degree square will be averaged during Cephalopod.
+
+## Community
+
+```{r}
+com <- allobjects %>% 
+  mutate(year=year(date),
+         month=month(date)) %>% 
+  group_by(genid,decimallatitude=latitude,decimallongitude=longitude,year,month) %>% 
+  summarize(measurementvalue=sum(grey_median*d)/sum(d)) %>% 
+  mutate(measurementunit="0-255",
+         taxonrank="Kingdom",
+         scientificname="all",
+         worms_id="all",
+         depth=200) %>% 
+  # add the varfactor day/night 
+  left_join(distinct(varfactor,genid,varfactor=day_night))
+```
+
+## Class/phylum
+
+```{r}
+class <- allobjects %>% 
+  mutate(year=year(date),
+         month=month(date)) %>% 
+  group_by(genid,decimallatitude=latitude,decimallongitude=longitude,year,month,scientificname=class_phylum) %>% 
+  summarize(measurementvalue=sum(grey_median*d)/sum(d)) %>% 
+  mutate(measurementunit="0-255",
+         taxonrank="Kingdom",
+         worms_id=scientificname,
+         depth=200) %>% 
+  # add the varfactor day/night 
+  left_join(distinct(varfactor,genid,varfactor=day_night))
+```
+
+# Export
+
+```{r}
+# put all and classes together (Cephalopod will run all as any of the other classes)
+write_csv(bind_rows(com,class),file.path(cfg$project$data,"cephalopod_samples_greymedian_mean_com+class.csv"))
+```

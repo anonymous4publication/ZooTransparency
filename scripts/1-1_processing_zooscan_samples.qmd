@@ -1,0 +1,170 @@
+---
+title: "Zooscan quality control" # title of the notebook
+author: "" 
+date: 2026-07-16
+description: 
+    This script applies quality control to zooscan samples.  
+html: 
+theme: sandstone
+#mainfont: "LM Roman"
+fontsize: 0.99em
+toc: true # table of contents
+toc-depth: 5 
+toc-location: left # table of contents on the left 
+lightbox: TRUE # allows to click on an image to zoom in the HTML document
+embed-resources: true # avoid having dependencies in an extra folder
+smooth-scroll: true
+editor: visual
+code-overflow: wrap
+code-fold: false
+execute:
+    eval: true # run the code chunks FALSE/TRUE
+    echo: true # print the source code FALSE/TRUE
+    error: true # print error messages FALSE/TRUE
+    message: false # print any message FALSE/TRUE
+    warning: false # print warning message FALSE/TRUE
+    cache: false 
+---
+
+```{r}
+#| eval: false
+#| echo: false
+
+Other outputs: pdf_document, html_notebook, word_document 
+The HTML below just says to use the "LM Roman" family as font (kind of Arial?) and if you want the Latex font, you just need "Latin Modern Roman". The line below indicates that the text has to be justified. 
+```
+
+```{r}
+#| include: false
+
+# make sure that no object is in the environment and collect the garbage 
+rm(list=ls())
+gc()
+```
+
+```{r}
+#| results: hide
+
+source("../config.R")
+
+# general 
+library(tidyverse) 
+library(lubridate)
+```
+
+# Data
+
+------------------------------------------------------------------------
+
+```{r}
+sp <- read_csv(file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions.csv"))
+```
+
+# Samples QC
+
+------------------------------------------------------------------------
+
+This QC is based on the past exploration of the samples:
+
+-   for Triatlas data, only samples above 200m are kept, and 5 locations (i.e. 8 samples) are missing the smaller 100-500um fraction (old to new ids)
+
+    -   226711 (missing), 226712 (missing) =\> 3657000078, 3657000079
+
+    -   226717 (missing), 226716 =\> 3657000083, 3657000084
+
+    -   226721 (missing), 226722 (missing) =\> 3657000088, 3657000089
+
+    -   226726 (missing), 226727 (missing) =\> 3657000093, 3657000094
+
+    -   226731 (missing), 226732 (missing) =\> 3657000098, 3657000099
+
+-   Triatlas 2018 has a location (209859, 209860 =\> 3657000012, 3657000013) with longitude -15 which should be -13 based on chronology and other instruments profiles data
+
+-   Triatlas 2022 has a location (454210, 454211 =\> 8788000029, 8788000030) with date 2025-04-25 that should be 2025-05-01 15h41 based on chronology and other instruments profiles data
+
+-   Triatlas sample 3657000038 is a special case: it is unusually dark (112 compared to samples that start at 159-160) so we investigated it, it is made of Foraminifera and although we didn't find similar occurrence in imaging instruments that were deployed before or after (UVP, PIScO), there is nothing that tells us it is not a biological signal, and one that's very interesting at that for the region but since we are considering here the global scale, it is an outlier and we remove it from the analysis (as well as 3657000037 which is the same location but the net 100-200m)
+
+-   keep the most recent Tara Polar Circle sample (sampleids 26795, 26877 =\> 378000027, 378000047) that was ran twice (26795 is the most recent one)
+
+-   correct the latitude of a Tara Polar Circle sample (sampleid=26705 =\> 378000004, station 184, datetime=2013-08-06 01:51:00) to match the logsheet (<https://doi.pangaea.de/10.1594/PANGAEA.842227?format=html&full=yes#lcol4_ds12608045>)
+
+-   remove samples with no tot_volume (NA or 999999) and correct the sample with \> 150m depth and \< 5L volume (use the net mouth opening and the depth max, used to be 3 with 453987 and 495833 but one removed and one corrected): 492994 with new id 10146000005
+
+-   remove any samples with a QC for the jar as wrong (2) or for a dry or rotten condition (2,3) =\> note that it keeps all the samples for which a QC was not assessed
+
+```{r}
+# missing fractions, duplicates and metadata correction 
+sp <- sp %>% 
+  # remove Triatlas samples with depth_max superior to 300m 
+  filter(!(str_detect(title,"Triatlas") & depth_max > 200)) %>% 
+  # remove Triatlas samples with missing 100-500um fraction
+  filter(!(sampleid %in% c(3657000078, 3657000079,
+                           3657000083, 3657000084,
+                           3657000088, 3657000089,
+                           3657000093, 3657000094, 
+                           3657000098, 3657000099))) %>% 
+  # correct longitude for samples in Triatlas 2018
+  mutate(longitude=ifelse(sampleid %in% c(3657000012, 3657000013),-13,longitude)) %>%
+  # correct date for samples in Triatlas 2022
+  mutate(date=if_else(sampleid %in% c(8788000029, 8788000030),as.POSIXct("2022-05-01 15:41:00"),date)) %>%
+  # remove the Tara Polar Circle sample that was ran twice 
+  filter(sampleid != 378000047) %>% 
+  # remove the outlier Triatlas sample 
+  filter(!(sampleid %in% c(3657000037,3657000038))) %>% 
+  # correct the latitude of the Tara Polar Circle that didn't match the logsheet
+  mutate(latitude=ifelse(sampleid==378000004,79.039,latitude)) 
+
+sp %>% distinct(title,genid) %>% nrow()
+
+# depth or volume absent or to correct
+sp <- sp %>% 
+  # update the total volume and remove NA volumes
+  mutate(tot_vol=ifelse(sampleid==10146000005,0.25*depth_max,tot_vol)) %>% 
+  filter(tot_vol != 999999 & !(is.na(tot_vol))) 
+sp %>% distinct(title,genid) %>% nrow()
+
+# wrong QC
+sp <- sp %>% 
+  # remove wrong qc samples
+  filter( qc_jar %in% c("0","1",NA_character_) & qc_condition %in% c("0","1",NA_character_)) 
+sp %>% distinct(title,genid) %>% nrow()
+```
+
+# Acquisitions QC
+
+------------------------------------------------------------------------
+
+Update all the Triatlas d1 to have a subpart of 1 (the d1 fraction was ran entirely).
+
+```{r}
+sp <- sp %>% 
+  # correct the Triatlas d1 fraction 
+  mutate(sub_part=ifelse(str_detect(title,"Triatlas") & fraction=="d1",1,sub_part))
+```
+
+# Processing
+
+------------------------------------------------------------------------
+
+Addition of the concentration and density factor based on the sub_part (Motoda fractionation) and the total volume sampled:
+
+```{r}
+sp <- sp %>% 
+  mutate(sub_part=as.numeric(sub_part)) %>%
+  mutate(conc=count*sub_part/tot_vol,
+         d=sub_part/tot_vol)
+nrow(sp)
+```
+
+Number of samples used:
+
+```{r}
+sp %>% ungroup() %>% distinct(genid) %>% nrow()
+sp %>% ungroup() %>% distinct(title,genid) %>% count(title) %>% arrange(n)
+```
+
+# Export
+
+```{r}
+write_csv(sp,file.path(cfg$project$data,"imagery_zooscan_samples+acquisitions_cleaned.csv"))
+```
