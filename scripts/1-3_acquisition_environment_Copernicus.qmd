@@ -131,8 +131,8 @@ lat  = xr.DataArray(sp["latitude"],  dims="genid")
 time = xr.DataArray(sp["date"], dims="genid")
 
 # data request
-username="vsonnet"
-password="CerataulinaPelagica10?"
+username="username"
+password="password"
 
 # function to calculate depth-weighted mean
 def depth_weighted_mean(ds, variables, max_depth=150):
